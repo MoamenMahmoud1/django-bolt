@@ -1,10 +1,11 @@
 //! Native operations used while constructing Python responses.
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::io::ErrorKind;
+use std::path::{Component, Path, PathBuf};
 
 use actix_web::cookie::time::{Date, Month};
-use pyo3::exceptions::{PyFileNotFoundError, PyPermissionError, PyValueError};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDateTime, PyDict, PyTuple};
 
@@ -44,31 +45,82 @@ pub fn format_cookie_date(value: &Bound<'_, PyDateTime>) -> PyResult<String> {
     ))
 }
 
+pyo3::import_exception!(django_bolt.exceptions, ResponseFileNotFound);
+pyo3::import_exception!(django_bolt.exceptions, ResponseFileNotAllowed);
+
+/// Win32 error for a symlink loop. Rust gives it no stable `ErrorKind`.
+#[cfg(windows)]
+const SYMLINK_LOOP: i32 = 1921;
+#[cfg(not(windows))]
+const SYMLINK_LOOP: i32 = libc::ELOOP;
+
+/// Map an error of the path lookup to the FileResponse error that Bolt answers.
+///
+/// The path often comes from the request, so a client must not get a 500 for
+/// it. A path that names no regular file is a 404, as in Django's `serve`.
+/// Only Bolt raises these errors, so the error handler maps only them to 404 and 403.
+///
+/// A path that the server may not read is a 403 when it is outside the allowed
+/// directories, because the client walked out of them. Inside them, or with no
+/// allowed directories, it is a server fault: a plain `PermissionError` and a logged 500.
+fn file_lookup_error(error: std::io::Error, path: &Path, allowed: Option<&[PathBuf]>) -> PyErr {
+    match error.kind() {
+        ErrorKind::PermissionDenied => match allowed {
+            Some(roots) if !lexically_within(path, roots) => not_allowed(path),
+            _ => PyErr::from(error),
+        },
+        ErrorKind::NotFound
+        | ErrorKind::NotADirectory
+        | ErrorKind::InvalidInput
+        | ErrorKind::InvalidFilename => file_not_found(path),
+        _ if error.raw_os_error() == Some(SYMLINK_LOOP) => file_not_found(path),
+        _ => PyErr::from(error),
+    }
+}
+
+/// Return true when the path lies in one of the roots, with `.` and `..` removed and links not resolved.
+fn lexically_within(path: &Path, roots: &[PathBuf]) -> bool {
+    let Ok(absolute) = std::path::absolute(path) else {
+        return false;
+    };
+    let mut normal = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::ParentDir => {
+                normal.pop();
+            }
+            Component::CurDir => {}
+            other => normal.push(other.as_os_str()),
+        }
+    }
+    roots.iter().any(|root| normal.starts_with(root))
+}
+
+fn file_not_found(path: &Path) -> PyErr {
+    ResponseFileNotFound::new_err(format!("File not found: {}", path.display()))
+}
+
+fn not_allowed(path: &Path) -> PyErr {
+    ResponseFileNotAllowed::new_err(format!(
+        "File path '{}' is not within allowed directories. Configure BOLT_ALLOWED_FILE_PATHS in Django settings.",
+        path.display()
+    ))
+}
+
 /// Resolve the path and check its type with one metadata lookup.
 #[pyfunction]
 pub fn resolve_response_file(path: PathBuf, allowed: Option<Vec<PathBuf>>) -> PyResult<OsString> {
-    let resolved = std::fs::canonicalize(&path).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            PyFileNotFoundError::new_err(format!("File not found: {}", path.display()))
-        } else if error.kind() == std::io::ErrorKind::InvalidInput
-            || error.raw_os_error() == Some(libc::ELOOP)
-        {
-            PyValueError::new_err(format!("Invalid file path: {error}"))
-        } else {
-            PyErr::from(error)
-        }
-    })?;
-    if !resolved.metadata()?.is_file() {
-        return Err(PyValueError::new_err(format!(
-            "Path is not a regular file: {}",
-            path.display()
-        )));
+    let roots = allowed.as_deref();
+    let resolved =
+        std::fs::canonicalize(&path).map_err(|error| file_lookup_error(error, &path, roots))?;
+    let metadata = resolved
+        .metadata()
+        .map_err(|error| file_lookup_error(error, &path, roots))?;
+    if !metadata.is_file() {
+        return Err(file_not_found(&path));
     }
-    if allowed.is_some_and(|roots| !roots.iter().any(|root| resolved.starts_with(root))) {
-        return Err(PyPermissionError::new_err(format!(
-            "File path '{}' is not within allowed directories. Configure BOLT_ALLOWED_FILE_PATHS in Django settings.",
-            path.display()
-        )));
+    if roots.is_some_and(|roots| !roots.iter().any(|root| resolved.starts_with(root))) {
+        return Err(not_allowed(&path));
     }
     Ok(resolved.into_os_string())
 }

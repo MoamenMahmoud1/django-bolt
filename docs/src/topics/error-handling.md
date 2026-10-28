@@ -382,13 +382,13 @@ api = BoltAPI(error_formatter=format_error)
 |------|--------|--------|
 | `bad_request` | 400 | Too many headers, a header that is too large, a body that Bolt cannot read, or a Django `SuspiciousOperation`, such as `DisallowedHost` |
 | `not_authenticated` | 401 | A guard, or an `HTTPException(401)` |
-| `forbidden` | 403 | A guard, the CSRF origin check of Bolt, `PermissionDenied` or an `HTTPException(403)` |
-| `not_found` | 404 | No route, `FileNotFoundError` or an `HTTPException(404)` |
+| `forbidden` | 403 | A guard, the CSRF origin check of Bolt, `PermissionDenied`, a `FileResponse` outside `BOLT_ALLOWED_FILE_PATHS` or an `HTTPException(403)` |
+| `not_found` | 404 | No route, a `FileResponse` or a `File` whose path names no regular file, or an `HTTPException(404)` |
 | `payload_too_large` | 413 | A body over `BOLT_MAX_UPLOAD_SIZE` |
 | `validation` | 422 | A value that fails validation, in Rust or in Python |
 | `rate_limited` | 429 | A rate limit |
 | `response_validation` | 500 | A handler return value that fails validation |
-| `internal_error` | 500 | An unhandled exception, or a failure in the Rust core, for example a file that Rust cannot read |
+| `internal_error` | 500 | An unhandled exception, also a `FileNotFoundError` or `PermissionError` of handler code, a file in `BOLT_ALLOWED_FILE_PATHS` that the server cannot read, or a failure in the Rust core |
 
 An `HTTPException` gets its kind from its status, for example `conflict` for 409. A status with no name gives `http_error`.
 
@@ -402,7 +402,7 @@ The formatter runs only for an error, and only when the app has a formatter. A r
 
 The formatter must be a sync callable. Bolt raises `TypeError` for an async one. The response of the formatter must have a status from 400 to 599. Each header name and value must be a `str`. The response cannot set cookies. When the formatter raises an exception or returns a response that is not valid, Bolt logs the error and sends the default response.
 
-Bolt logs each 500 error, also when the formatter formats it. An `HTTPException` is a planned response, so Bolt does not log it.
+Bolt logs each error that it answers with a 500 by default, also when the formatter gives another status. Bolt does not log an error that it answers with a 4xx by default, also when the formatter gives a 5xx. An `HTTPException` is a planned response, so Bolt does not log it.
 
 With more than one API in a project, `runbolt` uses one formatter for all of them. Set the same formatter on each API, or set it on one API. Two different formatters stop startup.
 

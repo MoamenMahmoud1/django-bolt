@@ -278,6 +278,23 @@ class GatewayTimeout(ServerException):
     status_code = 504
 
 
+class ResponseFileNotFound(FileNotFoundError):
+    """The path of a ``FileResponse`` or a ``File`` names no regular file. Bolt answers 404.
+
+    Only these responses raise it. A ``FileNotFoundError`` of handler code is
+    a server fault, and Bolt answers 500.
+    """
+
+
+class ResponseFileNotAllowed(PermissionError):
+    """The path of a ``FileResponse`` is outside ``BOLT_ALLOWED_FILE_PATHS``. Bolt answers 403.
+
+    Only ``FileResponse`` raises it. A ``PermissionError`` of handler code, or a
+    file in the allowed directories that the server cannot read, is a server
+    fault, and Bolt answers 500.
+    """
+
+
 # Helper functions for better error messages
 
 

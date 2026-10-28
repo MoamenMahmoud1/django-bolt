@@ -224,7 +224,8 @@ class File(CookieMixin):
         self.headers = headers or {}
 
     def read_bytes(self) -> bytes:
-        with open(self.path, "rb") as f:
+        # The lookup of FileResponse, so a path that names no regular file is a 404.
+        with open(resolve_response_file(self.path, None), "rb") as f:
             return f.read()
 
 
