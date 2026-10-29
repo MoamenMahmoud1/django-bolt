@@ -4,7 +4,7 @@
 /// by batching operations and pre-allocating capacity.
 use actix_web::body::MessageBody;
 use actix_web::http::header::{HeaderName, HeaderValue};
-use actix_web::{http::StatusCode, HttpResponse, HttpResponseBuilder};
+use actix_web::{HttpResponse, HttpResponseBuilder, http::StatusCode};
 
 use crate::cookies::format_cookie;
 use crate::response_meta::ResponseMeta;
@@ -142,10 +142,10 @@ where
     if let Some(ref headers) = meta.custom_headers {
         for (k, v) in headers {
             // Lowercase here instead of in Python (best practice from Robyn)
-            if let Ok(name) = HeaderName::try_from(k.to_ascii_lowercase()) {
-                if let Ok(val) = HeaderValue::try_from(v.as_str()) {
-                    builder.append_header((name, val));
-                }
+            if let Ok(name) = HeaderName::try_from(k.to_ascii_lowercase())
+                && let Ok(val) = HeaderValue::try_from(v.as_str())
+            {
+                builder.append_header((name, val));
             }
         }
     }

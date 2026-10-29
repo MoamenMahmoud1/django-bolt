@@ -8,7 +8,7 @@
 
 use actix_web::dev::Service;
 use actix_web::http::header::HeaderValue;
-use actix_web::{test, web, App};
+use actix_web::{App, test, web};
 use ahash::AHashMap;
 use bytes::Bytes;
 use dashmap::DashMap;
@@ -17,8 +17,8 @@ use parking_lot::RwLock;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use bolt_asgi::asgi_mounts::validate_and_sort_asgi_mounts;
 use bolt_core::cookies::cookie_pairs;
@@ -28,15 +28,15 @@ use bolt_core::middleware::cors::CorsMiddleware;
 use bolt_core::middleware::rate_limit::RateLimiters;
 use bolt_core::router::Router;
 use bolt_core::state::{
-    find_websocket_mount_in_slice, AppState, AsgiMount, ScopeConfig, ServeMode, TASK_LOCALS,
+    AppState, AsgiMount, ScopeConfig, ServeMode, TASK_LOCALS, find_websocket_mount_in_slice,
 };
-use bolt_websocket::handler::build_asgi_scope_from_parts;
 use bolt_websocket::WebSocketRouter;
+use bolt_websocket::handler::build_asgi_scope_from_parts;
 
-use crate::server::{configure_file_scopes, inject_global_cors, static_scope_prefix, ServerConfig};
+use crate::server::{ServerConfig, configure_file_scopes, inject_global_cors, static_scope_prefix};
 use bolt_core::request_pipeline::{
-    insert_header_line, query_sequences, set_declared_item, set_param_item, set_query_sequences,
-    EMPTY_TYPES,
+    EMPTY_TYPES, insert_header_line, query_sequences, set_declared_item, set_param_item,
+    set_query_sequences,
 };
 use bolt_core::type_coercion::TypeHints;
 
@@ -759,7 +759,7 @@ pub fn handle_test_websocket(
     query_string: Option<String>,
 ) -> PyResult<(bool, bool, usize, Py<PyAny>, Py<PyAny>, Py<PyAny>)> {
     use bolt_core::middleware::auth::authenticate;
-    use bolt_core::permissions::{evaluate_guards, GuardResult};
+    use bolt_core::permissions::{GuardResult, evaluate_guards};
     use bolt_core::router::parse_query_string;
 
     let entry = test_app(app_id)?;
@@ -843,38 +843,38 @@ pub fn handle_test_websocket(
     // Rate limiting for WebSocket: address and header keys before auth,
     // identity keys after it.
     let mut client_ip = None;
-    if let Some(route_meta) = app.route_metadata.get(handler_id) {
-        if let Some(ref rate_config) = route_meta.rate_limit_config {
-            client_ip = (!matches!(rate_config.key, RateLimitKey::Header(_)))
-                .then(|| {
-                    bolt_core::middleware::client_ip::resolve(
-                        header_map
-                            .get("x-forwarded-for")
-                            .into_iter()
-                            .map(|value| Some(value.as_str())),
-                        header_map
-                            .get("x-real-ip")
-                            .map(|value| Some(value.as_str())),
-                        Some(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
-                        &app.config.trusted_proxies,
-                    )
-                })
-                .flatten();
-            if bolt_core::middleware::rate_limit::check_before_auth(
-                &app.rate_limiters,
-                handler_id,
-                &header_map,
-                client_ip.as_ref(),
-                rate_config,
-                "GET",
-                &path,
-            )
-            .is_some()
-            {
-                return Err(pyo3::exceptions::PyPermissionError::new_err(
-                    "Rate limit exceeded",
-                ));
-            }
+    if let Some(route_meta) = app.route_metadata.get(handler_id)
+        && let Some(ref rate_config) = route_meta.rate_limit_config
+    {
+        client_ip = (!matches!(rate_config.key, RateLimitKey::Header(_)))
+            .then(|| {
+                bolt_core::middleware::client_ip::resolve(
+                    header_map
+                        .get("x-forwarded-for")
+                        .into_iter()
+                        .map(|value| Some(value.as_str())),
+                    header_map
+                        .get("x-real-ip")
+                        .map(|value| Some(value.as_str())),
+                    Some(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+                    &app.config.trusted_proxies,
+                )
+            })
+            .flatten();
+        if bolt_core::middleware::rate_limit::check_before_auth(
+            &app.rate_limiters,
+            handler_id,
+            &header_map,
+            client_ip.as_ref(),
+            rate_config,
+            "GET",
+            &path,
+        )
+        .is_some()
+        {
+            return Err(pyo3::exceptions::PyPermissionError::new_err(
+                "Rate limit exceeded",
+            ));
         }
     }
 
@@ -918,8 +918,8 @@ pub fn handle_test_websocket(
 
         // After guards, mirroring the production upgrade path: a rejected
         // upgrade must not spend the bucket it would have been counted in.
-        if let Some(rate_config) = route_meta.rate_limit_config.as_ref() {
-            if bolt_core::middleware::rate_limit::check_after_auth(
+        if let Some(rate_config) = route_meta.rate_limit_config.as_ref()
+            && bolt_core::middleware::rate_limit::check_after_auth(
                 &app.rate_limiters,
                 handler_id,
                 &header_map,
@@ -930,11 +930,10 @@ pub fn handle_test_websocket(
                 &path,
             )
             .is_some()
-            {
-                return Err(pyo3::exceptions::PyPermissionError::new_err(
-                    "Rate limit exceeded",
-                ));
-            }
+        {
+            return Err(pyo3::exceptions::PyPermissionError::new_err(
+                "Rate limit exceeded",
+            ));
         }
     }
 
@@ -1075,8 +1074,8 @@ pub fn handle_test_websocket(
 #[cfg(test)]
 mod tests {
     use super::{
-        destroy_test_app, register_test_middleware_metadata, registry, RouteMetadataStore, Router,
-        ServerConfig, TestAppState, WebSocketRouter, TEST_ID_GEN,
+        RouteMetadataStore, Router, ServerConfig, TEST_ID_GEN, TestAppState, WebSocketRouter,
+        destroy_test_app, register_test_middleware_metadata, registry,
     };
     use bolt_core::middleware::client_ip::TrustedProxies;
     use bolt_core::streaming::StreamConfig;
@@ -1084,9 +1083,9 @@ mod tests {
     use parking_lot::RwLock;
     use pyo3::prelude::*;
     use pyo3::types::{PyCFunction, PyDict, PyModule};
+    use std::sync::Arc;
     use std::sync::atomic::Ordering;
     use std::sync::mpsc;
-    use std::sync::Arc;
     use std::time::Duration;
 
     /// Put an app with no routes and no Django settings into the registry.

@@ -1,6 +1,6 @@
 use actix_http::KeepAlive;
 use actix_web::{
-    self as aw, http::header::HeaderValue, web, App, HttpRequest, HttpResponse, HttpServer,
+    self as aw, App, HttpRequest, HttpResponse, HttpServer, http::header::HeaderValue, web,
 };
 use ahash::AHashMap;
 use pyo3::prelude::*;
@@ -19,18 +19,18 @@ use bolt_core::middleware::compression::CompressionMiddleware;
 use bolt_core::middleware::cors::CorsMiddleware;
 use bolt_core::router::Router;
 use bolt_core::settings::{
-    env_flag, env_non_negative_int, env_positive_int, env_var, improperly_configured,
-    DjangoSettings,
+    DjangoSettings, env_flag, env_non_negative_int, env_positive_int, env_var,
+    improperly_configured,
 };
 use bolt_core::state::{
-    find_websocket_mount, AppState, ScopeConfig, ServeMode, GLOBAL_ASGI_MOUNTS, GLOBAL_ROUTER,
-    ROUTE_METADATA_TEMP, TASK_LOCALS,
+    AppState, GLOBAL_ASGI_MOUNTS, GLOBAL_ROUTER, ROUTE_METADATA_TEMP, ScopeConfig, ServeMode,
+    TASK_LOCALS, find_websocket_mount,
 };
 use bolt_core::static_files::handle_file;
 use bolt_core::streaming::StreamConfig;
 use bolt_websocket::{
-    handle_websocket_upgrade, is_websocket_upgrade, WebSocketRouter, WsConfig, WsTarget,
-    GLOBAL_WEBSOCKET_ROUTER,
+    GLOBAL_WEBSOCKET_ROUTER, WebSocketRouter, WsConfig, WsTarget, handle_websocket_upgrade,
+    is_websocket_upgrade,
 };
 
 /// Reject URL prefixes containing actix scope path-param syntax.
@@ -293,27 +293,27 @@ fn read_cors_and_file_scopes(
         // Get STATIC_ROOT (primary location for collected static files).
         // Defaults to None in Django when not configured -- skip None so we
         // don't push the literal string "None".
-        if let Some(static_root) = settings.get("STATIC_ROOT")? {
-            if !static_root.is_none() {
-                if let Some(root_str) = settings_path_to_string(&static_root) {
-                    if !root_str.is_empty() {
-                        directories.push(root_str);
-                    }
-                }
-            }
+        if let Some(static_root) = settings.get("STATIC_ROOT")?
+            && !static_root.is_none()
+            && let Some(root_str) = settings_path_to_string(&static_root)
+            && !root_str.is_empty()
+        {
+            directories.push(root_str);
         }
 
         // Get STATICFILES_DIRS (additional directories). Convert element-wise
         // rather than `extract::<Vec<String>>`, which would fail the whole
         // list on the first Path entry.
-        if let Some(static_dirs) = settings.get("STATICFILES_DIRS")? {
-            if let Ok(iter) = static_dirs.try_iter() {
-                for entry in iter.flatten() {
-                    if let Some(dir) = settings_path_to_string(&entry) {
-                        if !dir.is_empty() && dir != "None" && !directories.contains(&dir) {
-                            directories.push(dir);
-                        }
-                    }
+        if let Some(static_dirs) = settings.get("STATICFILES_DIRS")?
+            && let Ok(iter) = static_dirs.try_iter()
+        {
+            for entry in iter.flatten() {
+                if let Some(dir) = settings_path_to_string(&entry)
+                    && !dir.is_empty()
+                    && dir != "None"
+                    && !directories.contains(&dir)
+                {
+                    directories.push(dir);
                 }
             }
         }
@@ -338,9 +338,9 @@ fn read_cors_and_file_scopes(
         // full URLs and missing leading slash produce malformed scope prefixes.
         if !media_url.starts_with('/') {
             eprintln!(
-                    "[django-bolt] Warning: MEDIA_URL must start with '/' for in-process serving (got {:?}); ignoring.",
-                    media_url
-                );
+                "[django-bolt] Warning: MEDIA_URL must start with '/' for in-process serving (got {:?}); ignoring.",
+                media_url
+            );
             return Ok(None);
         }
         let url_prefix = media_url.trim_end_matches('/').to_string();
@@ -422,7 +422,9 @@ fn read_cors_and_file_scopes(
 
     // Validate CORS configuration: wildcard + credentials is invalid per spec
     if allow_all && credentials {
-        eprintln!("[django-bolt] Warning: CORS_ALLOW_ALL_ORIGINS=True with CORS_ALLOW_CREDENTIALS=True is invalid.");
+        eprintln!(
+            "[django-bolt] Warning: CORS_ALLOW_ALL_ORIGINS=True with CORS_ALLOW_CREDENTIALS=True is invalid."
+        );
         eprintln!(
             "[django-bolt] Per CORS spec, wildcard origin (*) cannot be used with credentials."
         );
@@ -871,13 +873,12 @@ pub fn start_server(
                     // Multi-write responses (streaming, SSE, ASGI mounts) hit
                     // the Nagle + delayed-ACK 40 ms stall without TCP_NODELAY.
                     .on_connect(|conn, _ext| {
-                        if let Some(stream) = conn.downcast_ref::<actix_web::rt::net::TcpStream>() {
-                            if let Err(err) = stream.set_nodelay(true) {
+                        if let Some(stream) = conn.downcast_ref::<actix_web::rt::net::TcpStream>()
+                            && let Err(err) = stream.set_nodelay(true) {
                                 eprintln!(
                                     "[django-bolt] Failed to set TCP_NODELAY on connection: {err}"
                                 );
                             }
-                        }
                     })
                     // A read-side EOF while a handler runs is a client that
                     // went away. Drop the handler, so ASGI mounts get
@@ -975,7 +976,7 @@ fn bind_listener(
 /// actix-server's default per-signal semantics.
 #[cfg(unix)]
 async fn wait_for_shutdown_signal() -> bool {
-    use tokio::signal::unix::{signal, SignalKind};
+    use tokio::signal::unix::{SignalKind, signal};
 
     // If a handler cannot be installed, log it and never resolve that arm:
     // the remaining signals still work, and the OS default disposition was
@@ -1066,28 +1067,28 @@ pub async fn websocket_upgrade_handler(
     };
 
     // Look up in global WebSocket router
-    if let Some(ws_router) = GLOBAL_WEBSOCKET_ROUTER.get() {
-        if let Some((route, path_params)) = ws_router.find(normalized_path) {
-            let (handler, injector) = Python::attach(|py| {
-                (
-                    route.handler.clone_ref(py),
-                    route.injector.as_ref().map(|i| i.clone_ref(py)),
-                )
-            });
-            // Pass AppState to WebSocket handler for CORS validation and connection tracking
-            return handle_websocket_upgrade(
-                req,
-                stream,
-                WsTarget::Route {
-                    handler,
-                    handler_id: route.handler_id,
-                    path_params,
-                    injector,
-                },
-                state.get_ref().clone(),
+    if let Some(ws_router) = GLOBAL_WEBSOCKET_ROUTER.get()
+        && let Some((route, path_params)) = ws_router.find(normalized_path)
+    {
+        let (handler, injector) = Python::attach(|py| {
+            (
+                route.handler.clone_ref(py),
+                route.injector.as_ref().map(|i| i.clone_ref(py)),
             )
-            .await;
-        }
+        });
+        // Pass AppState to WebSocket handler for CORS validation and connection tracking
+        return handle_websocket_upgrade(
+            req,
+            stream,
+            WsTarget::Route {
+                handler,
+                handler_id: route.handler_id,
+                path_params,
+                injector,
+            },
+            state.get_ref().clone(),
+        )
+        .await;
     }
 
     Ok(HttpResponse::NotFound().body("WebSocket endpoint not found"))
