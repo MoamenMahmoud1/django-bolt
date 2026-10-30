@@ -28,6 +28,24 @@ def _seed():
     )
 
 
+def _seed_interleaved():
+    Article.objects.bulk_create(
+        [
+            Article(
+                title=f"{PREFIX}{i:02d}",
+                content="interleaved cursor probe",
+                author="A" if i % 2 == 0 else "B",
+            )
+            for i in range(18)
+        ]
+    )
+
+
+def _assert_author_order(found, authors_by_id, ordering):
+    authors = [authors_by_id[item_id] for item_id in found]
+    assert authors == sorted(authors, reverse=ordering.startswith("-"))
+
+
 def _api(ordering, projection="model", page_size=3):
     api = BoltAPI()
 
@@ -73,11 +91,24 @@ def _walk(client, *, key, max_pages=30):
 @pytest.mark.parametrize("ordering", ["author", "-author"])
 def test_duplicate_ordering_models_complete(ordering):
     _seed()
-    expected = set(Article.objects.filter(title__startswith=PREFIX).values_list("id", flat=True))
+    authors_by_id = dict(Article.objects.filter(title__startswith=PREFIX).values_list("id", "author"))
     with TestClient(_api(ordering)) as client:
         found = _walk(client, key="id")
-    assert len(found) == len(expected)
-    assert set(found) == expected
+    assert len(found) == len(authors_by_id)
+    assert set(found) == set(authors_by_id)
+    _assert_author_order(found, authors_by_id, ordering)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("ordering", ["author", "-author"])
+def test_interleaved_author_ordering(ordering):
+    _seed_interleaved()
+    authors_by_id = dict(Article.objects.filter(title__startswith=PREFIX).values_list("id", "author"))
+    with TestClient(_api(ordering)) as client:
+        found = _walk(client, key="id")
+    assert len(found) == len(authors_by_id)
+    assert set(found) == set(authors_by_id)
+    _assert_author_order(found, authors_by_id, ordering)
 
 
 @pytest.mark.django_db(transaction=True)
@@ -125,3 +156,50 @@ def test_datetime_ties_complete():
         found = _walk(client, key="id")
     assert len(found) == len(expected)
     assert set(found) == expected
+
+
+@pytest.mark.django_db(transaction=True)
+def test_invalid_composite_pk_resets_to_first_page():
+    _seed()
+    cursor = CursorPagination()._encode_cursor({"value": "A", "pk": "invalid-pk"}, kind="composite-v2")
+    with TestClient(_api("author")) as client:
+        first = client.get("/cursor-edge")
+        malformed = client.get("/cursor-edge?cursor=" + quote(cursor, safe=""))
+    assert first.status_code == malformed.status_code == 200
+    assert first.json()["items"] == malformed.json()["items"]
+    assert malformed.json()["has_previous"] is False
+
+
+def test_legacy_json_values_are_not_interpreted_as_structural_cursors():
+    pagination = CursorPagination()
+    legacy_json = {"value": "A", "pk": 7}
+    json_null = {"null": True}
+    assert pagination._decode_cursor(pagination._encode_cursor(legacy_json)) == legacy_json
+    assert pagination._decode_cursor(pagination._encode_cursor(json_null)) == json_null
+    tagged = pagination._decode_cursor(pagination._encode_cursor({"value": "A", "pk": 7}, kind="composite-v2"))
+    assert tagged != legacy_json
+    null_tagged = pagination._decode_cursor(pagination._encode_cursor(None, kind="null-v2"))
+    assert null_tagged is not None and null_tagged != json_null
+
+
+@pytest.mark.django_db(transaction=True)
+def test_union_values_first_page_retains_legacy_support():
+    _seed()
+    api = BoltAPI()
+
+    class Page(CursorPagination):
+        ordering = "author"
+        page_size = 1
+
+    @api.get("/cursor-union")
+    @paginate(Page)
+    async def list_articles(request):
+        items = Article.objects.filter(author="A", title__startswith=PREFIX).values("author")
+        others = Article.objects.filter(author="B", title__startswith=PREFIX).values("author")
+        return items.union(others)
+
+    with TestClient(api) as client:
+        response = client.get("/cursor-union")
+    assert response.status_code == 200, response.text
+    assert response.json()["items"] == [{"author": "A"}]
+    assert response.json()["has_next"] is True

@@ -27,10 +27,10 @@ import inspect
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from functools import wraps
-from typing import Any, Generic, TypeVar, get_args, get_origin
+from typing import Any, Generic, NamedTuple, TypeVar, get_args, get_origin
 
 import msgspec
-from django.core.exceptions import FieldDoesNotExist
+from django.core.exceptions import FieldDoesNotExist, ValidationError
 from django.db import connections
 from django.db.models import F, Q
 from django.db.models.fields.tuple_lookups import (
@@ -62,6 +62,13 @@ __all__ = [
 
 T = TypeVar("T")
 _PAGINATION_UNSET = object()
+_CURSOR_NULL = object()
+
+
+class _CompositeCursor(NamedTuple):
+    value: Any
+    pk: Any
+
 
 
 class PaginatedResponse(msgspec.Struct, Generic[T], omit_defaults=True):  # noqa: UP046 — PEP 695 params are unresolvable under PEP 563
@@ -589,7 +596,7 @@ class CursorPagination(PaginationBase):
     page_size_query_param: str = "page_size"
     ordering: str = "-id"  # Default ordering field
 
-    def _encode_cursor(self, value: Any) -> str:
+    def _encode_cursor(self, value: Any, *, kind: str | None = None) -> str:
         """
         Encode cursor value to base64 string.
 
@@ -599,7 +606,9 @@ class CursorPagination(PaginationBase):
         Returns:
             Base64-encoded cursor string
         """
-        cursor_data = _json.encode({"v": value})
+        # Keep legacy scalar wire format; tag new cursor types outside the value.
+        data = {"v": value} if kind is None else {"v": value, "t": kind}
+        cursor_data = _json.encode(data)
         return base64.b64encode(cursor_data).decode("utf-8")
 
     def _decode_cursor(self, cursor: str) -> Any:
@@ -615,7 +624,16 @@ class CursorPagination(PaginationBase):
         try:
             cursor_data = base64.b64decode(cursor.encode("utf-8"))
             data = msgspec.json.decode(cursor_data)
-            return data.get("v")
+            if not isinstance(data, dict):
+                return None
+            value = data.get("v")
+            if data.get("t") == "composite-v2":
+                if not isinstance(value, dict) or set(value) != {"value", "pk"}:
+                    return None
+                return _CompositeCursor(value["value"], value["pk"])
+            if data.get("t") == "null-v2":
+                return _CURSOR_NULL if value is None else None
+            return value
         except Exception:
             return None
 
@@ -658,6 +676,10 @@ class CursorPagination(PaginationBase):
         except FieldDoesNotExist:
             sort_field = None  # Annotation rather than a model field.
 
+        if ordering_field != "pk" and ordering_field not in queryset.query.annotation_select:
+            if sort_field is None or not sort_field.concrete or "__" in ordering_field:
+                raise ValueError("CursorPagination ordering must be a concrete field or annotation")
+
         if sort_field is not None and sort_field.concrete and sort_field.is_relation:
             if not (sort_field.many_to_one or sort_field.one_to_one):
                 raise ValueError("CursorPagination cannot order by a multi-valued relation")
@@ -698,6 +720,10 @@ class CursorPagination(PaginationBase):
             if queryset.query.group_by:
                 if queryset.query.group_by is True or len(queryset.query.group_by) != 1:
                     raise ValueError("CursorPagination needs one unique GROUP BY ordering key")
+                group_key = queryset.query.group_by[0]
+                grouped_ordering = queryset.query.resolve_ref(ordering_field)
+                if group_key != grouped_ordering and getattr(group_key, "refs", None) != ordering_field:
+                    raise ValueError("CursorPagination GROUP BY ordering must match the grouped key")
             elif queryset.query.distinct:
                 extra_columns = set(queryset.query.annotation_select) | set(queryset.query.extra_select)
                 if extra_columns - {
@@ -720,7 +746,9 @@ class CursorPagination(PaginationBase):
             not selected_fields  # values() with no arguments includes the PK
             or bool({"pk", pk_field.name, pk_field.attname}.intersection(selected_fields))
         )
-        needs_hidden_pk = projected and not grouped_or_distinct and not pk_is_projected
+        # Django disallows annotate() after union(); keep its legacy first page.
+        is_combined = queryset.query.combinator is not None
+        needs_hidden_pk = projected and not grouped_or_distinct and not pk_is_projected and not is_combined
         if needs_hidden_pk:
             while hidden_pk_field in selected_fields or hidden_pk_field in queryset.query.annotations:
                 hidden_pk_field += "_"
@@ -733,7 +761,7 @@ class CursorPagination(PaginationBase):
 
         # Preserve the original -id fast path and avoid changing SQL meaning
         # on aggregated or DISTINCT querysets.
-        use_pk_tiebreaker = not is_pk_ordering and not grouped_or_distinct
+        use_pk_tiebreaker = not is_pk_ordering and not grouped_or_distinct and not is_combined
         ordered_qs = (
             queryset.order_by(ordering, "-pk" if is_descending else "pk")
             if use_pk_tiebreaker
@@ -741,10 +769,23 @@ class CursorPagination(PaginationBase):
         )
         lookup = "lt" if is_descending else "gt"
 
+        if isinstance(cursor_value, _CompositeCursor):
+            if not use_pk_tiebreaker:
+                raise ValueError("Composite cursor is not valid for this ordering")
+            try:
+                cursor_pk = pk_field.to_python(cursor_value.pk)
+                if cursor_pk is None:
+                    raise ValueError("Missing cursor primary key")
+                cursor_value = _CompositeCursor(cursor_value.value, cursor_pk)
+            except (TypeError, ValueError, OverflowError, ValidationError):
+                cursor_value = None  # Invalid cursor: behave like the first page.
+        elif cursor_value is _CURSOR_NULL and (not grouped_or_distinct or is_pk_ordering):
+            cursor_value = None
+
         if grouped_or_distinct and not is_pk_ordering and cursor_value is not None:
             nulls_first = connections[queryset.db].features.nulls_order_largest == is_descending
             null_lookup = f"{ordering_field}__isnull"
-            if cursor_value == {"null": True}:
+            if cursor_value is _CURSOR_NULL:
                 # NULL is a real cursor position, not a missing cursor.
                 ordered_qs = ordered_qs.filter(**{null_lookup: False}) if nulls_first else ordered_qs.none()
             else:
@@ -756,10 +797,8 @@ class CursorPagination(PaginationBase):
                 if nullable and not nulls_first:
                     after_cursor |= Q(**{null_lookup: True})
                 ordered_qs = ordered_qs.filter(after_cursor)
-        elif isinstance(cursor_value, dict) and set(cursor_value) == {"value", "pk"}:
-            if not use_pk_tiebreaker:
-                raise ValueError("Composite cursor is not valid for this ordering")
-            value, cursor_pk = cursor_value["value"], cursor_value["pk"]
+        elif isinstance(cursor_value, _CompositeCursor):
+            value, cursor_pk = cursor_value
             nulls_first = connections[queryset.db].features.nulls_order_largest == is_descending
             try:
                 nullable = queryset.model._meta.get_field(ordering_field).null
@@ -860,9 +899,9 @@ class CursorPagination(PaginationBase):
 
             if use_pk_tiebreaker and last_pk is not None:
                 # NULL is a valid sort value, not the absence of a cursor.
-                next_cursor = self._encode_cursor({"value": last_value, "pk": last_pk})
+                next_cursor = self._encode_cursor({"value": last_value, "pk": last_pk}, kind="composite-v2")
             elif grouped_or_distinct and not is_pk_ordering and last_value is None:
-                next_cursor = self._encode_cursor({"null": True})
+                next_cursor = self._encode_cursor(None, kind="null-v2")
             elif last_value is not None:
                 next_cursor = self._encode_cursor(last_value)
 

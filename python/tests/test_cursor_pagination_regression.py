@@ -10,7 +10,7 @@ from django_bolt.testing import TestClient
 from .test_models import Article
 
 
-def _make_cursor_case():
+def _make_cursor_case(size):
     """Build a dataset with deliberately duplicated ordering values."""
 
     Article.objects.bulk_create(
@@ -29,7 +29,7 @@ def _make_cursor_case():
     api = BoltAPI()
 
     class CursorByAuthor(CursorPagination):
-        page_size = 8
+        page_size = size
         ordering = "author"
 
     @api.get("/cursor-regression")
@@ -40,9 +40,10 @@ def _make_cursor_case():
     return api, expected_ids
 
 
+@pytest.mark.parametrize("page_size", [8, 7])
 @pytest.mark.django_db(transaction=True)
-def test_cursor_nonunique_ordering_preserves_all_rows():
-    api, expected_ids = _make_cursor_case()
+def test_cursor_nonunique_ordering_preserves_all_rows(page_size):
+    api, expected_ids = _make_cursor_case(page_size)
 
     seen_ids = []
     cursor = None

@@ -318,3 +318,24 @@ async def test_distinct_extra_annotation_rejected_instead_of_skipping_rows(
 
     with pytest.raises(ValueError, match="DISTINCT.*extra selected"):
         await Page().paginate_queryset(qs, {"query": {}})
+
+
+@pytest.mark.asyncio
+async def test_nested_cursor_ordering_is_rejected_before_evaluation():
+    class Nested(CursorPagination):
+        ordering = "author__name"
+
+    with pytest.raises(ValueError, match="concrete field or annotation"):
+        await Nested().paginate_queryset(BlogPost.objects.all(), {"query": {}})
+
+
+@pytest.mark.asyncio
+async def test_grouped_aggregate_sort_alias_rejected_without_unique_group_key():
+    queryset = Article.objects.values("author").annotate(sort=Count("id")).values("sort")
+
+    class AggregateSort(CursorPagination):
+        ordering = "sort"
+        page_size = 1
+
+    with pytest.raises(ValueError, match="GROUP BY ordering must match"):
+        await AggregateSort().paginate_queryset(queryset, {"query": {}})
