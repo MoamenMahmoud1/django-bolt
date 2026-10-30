@@ -51,6 +51,29 @@ def test_route_origins_do_not_take_the_global_patterns(global_cors):
         assert _origin_headers(client, "/open", "https://shop.example.com")[0] == "https://shop.example.com"
 
 
+def test_a_path_with_repeated_slashes_keeps_the_route_origins(global_cors):
+    api = BoltAPI()
+
+    @api.get("/api/admin")
+    @cors(origins=["https://admin.example.com"], credentials=True)
+    async def admin():
+        return {}
+
+    with TestClient(api, use_http_layer=True) as client:
+        # The router merges the slashes and runs this route, so its own origins apply.
+        assert _origin_headers(client, "/api//admin", "https://admin.example.com") == (
+            "https://admin.example.com",
+            "true",
+        )
+        assert _origin_headers(client, "/api//admin", "https://global.test") == (None, None)
+        preflight = client.options(
+            "/api//admin",
+            headers={"Origin": "https://admin.example.com", "Access-Control-Request-Method": "GET"},
+        )
+        assert preflight.headers.get(ALLOW_ORIGIN) == "https://admin.example.com"
+        assert preflight.headers.get(ALLOW_CREDENTIALS) == "true"
+
+
 def test_route_origin_regexes_allow_matching_origins(global_cors):
     api = BoltAPI()
 
