@@ -80,6 +80,22 @@ async def list_articles(request) -> list[ArticleSerializer]:
 
 Query: `/articles?cursor=eyJ2IjoxMDB9`
 
+### Ordering ties and cursor stability
+
+For non-primary-key ordering, `CursorPagination` uses the primary key to break
+sorting ties, so a page boundary cannot skip rows sharing an ordering value.
+Treat cursor strings as opaque. Old scalar cursors are accepted, but cannot
+identify a particular row among equal ordering values.
+
+For `.values()` and `.values_list()` querysets, include the ordering field in
+the projection. Foreign-key ordering uses the stored ID, not the related model object. Bolt may read the primary key internally without adding it to
+returned items. Single-key `DISTINCT` and `GROUP BY` projections are pageable
+when their ordering field uniquely identifies each result; other grouped or
+distinct projections raise `ValueError`. A `DISTINCT` projection with additional non-grouped selected annotations is also rejected to avoid silently dropping rows. NULL ordering values are supported.
+
+On large PostgreSQL tables, a suitable B-tree index on the ordering field and
+primary key can help seek efficiently through deep pages.
+
 ## Specifying the Serializer
 
 Two equivalent ways to specify which serializer to use:
