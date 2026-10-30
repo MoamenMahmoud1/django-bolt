@@ -3,12 +3,21 @@
 from urllib.parse import quote
 
 import pytest
+from django.db import models
 from django.db.models import Case, Count, F, IntegerField, Value, When
 
 from django_bolt import BoltAPI, CursorPagination, paginate
 from django_bolt.testing import TestClient
 
 from .test_models import Article, Author, BlogPost
+
+
+class _JSONOrderingProbe(models.Model):
+    payload = models.JSONField(null=True)
+
+    class Meta:
+        app_label = "django_bolt"
+        managed = False
 
 
 def _seed():
@@ -339,3 +348,19 @@ async def test_grouped_aggregate_sort_alias_rejected_without_unique_group_key():
 
     with pytest.raises(ValueError, match="GROUP BY ordering must match"):
         await AggregateSort().paginate_queryset(queryset, {"query": {}})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["distinct", "grouped"])
+async def test_jsonfield_grouped_or_distinct_ordering_rejected(kind):
+    queryset = _JSONOrderingProbe.objects.values("payload")
+    if kind == "distinct":
+        queryset = queryset.distinct()
+    else:
+        queryset = queryset.annotate(total=Count("id"))
+
+    class ByJSON(CursorPagination):
+        ordering = "payload"
+
+    with pytest.raises(ValueError, match="JSONField ordering"):
+        await ByJSON().paginate_queryset(queryset, {"query": {}})

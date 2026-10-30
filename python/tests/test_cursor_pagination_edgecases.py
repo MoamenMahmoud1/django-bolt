@@ -5,6 +5,7 @@ import json
 from urllib.parse import quote
 
 import pytest
+from django.db.models import Case, JSONField, Value, When
 from django.utils import timezone
 
 from django_bolt import BoltAPI, CursorPagination, paginate
@@ -182,6 +183,43 @@ def test_legacy_json_values_are_not_interpreted_as_structural_cursors():
     assert null_tagged is not None and null_tagged != json_null
 
 
+
+@pytest.mark.django_db(transaction=True)
+def test_legacy_json_object_cursor_uses_scalar_filter():
+    _seed()
+    boundary = {"value": "A", "pk": 7}
+    json_sort = Case(
+        When(author="A", then=Value(boundary, output_field=JSONField())),
+        default=Value({"value": "B", "pk": 8}, output_field=JSONField()),
+        output_field=JSONField(),
+    )
+    queryset = Article.objects.filter(title__startswith=PREFIX).annotate(json_sort=json_sort)
+    expected_ids = list(
+        queryset.filter(json_sort__gt=boundary).order_by("json_sort", "pk").values_list("id", flat=True)[:2]
+    )
+    assert len(expected_ids) == 2
+
+    api = BoltAPI()
+
+    class Page(CursorPagination):
+        ordering = "json_sort"
+        page_size = 2
+
+    @api.get("/cursor-json-legacy")
+    @paginate(Page)
+    async def list_articles(request):
+        return Article.objects.filter(title__startswith=PREFIX).annotate(json_sort=json_sort)
+
+    legacy = base64.b64encode(json.dumps({"v": boundary}).encode()).decode()
+    with TestClient(api) as client:
+        response = client.get("/cursor-json-legacy?cursor=" + quote(legacy, safe=""))
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert [row["id"] for row in data["items"]] == expected_ids
+    assert data["has_next"] is True
+    assert data["next_cursor"] is not None
+
+
 @pytest.mark.django_db(transaction=True)
 def test_union_values_first_page_retains_legacy_support():
     _seed()
@@ -203,3 +241,4 @@ def test_union_values_first_page_retains_legacy_support():
     assert response.status_code == 200, response.text
     assert response.json()["items"] == [{"author": "A"}]
     assert response.json()["has_next"] is True
+    assert response.json()["next_cursor"] is not None

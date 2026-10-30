@@ -676,9 +676,12 @@ class CursorPagination(PaginationBase):
         except FieldDoesNotExist:
             sort_field = None  # Annotation rather than a model field.
 
-        if ordering_field != "pk" and ordering_field not in queryset.query.annotation_select:
-            if sort_field is None or not sort_field.concrete or "__" in ordering_field:
-                raise ValueError("CursorPagination ordering must be a concrete field or annotation")
+        if (
+            ordering_field != "pk"
+            and ordering_field not in queryset.query.annotation_select
+            and (sort_field is None or not sort_field.concrete or "__" in ordering_field)
+        ):
+            raise ValueError("CursorPagination ordering must be a concrete field or annotation")
 
         if sort_field is not None and sort_field.concrete and sort_field.is_relation:
             if not (sort_field.many_to_one or sort_field.one_to_one):
@@ -709,6 +712,9 @@ class CursorPagination(PaginationBase):
         # these two cases; otherwise fail clearly rather than lose rows.
         grouped_or_distinct = projected and bool(queryset.query.distinct or queryset.query.group_by)
         if grouped_or_distinct and not is_pk_ordering:
+            # JSON null and SQL NULL are indistinguishable in projected results.
+            if sort_field is not None and sort_field.get_internal_type() == "JSONField":
+                raise ValueError("CursorPagination cannot paginate DISTINCT/GROUP BY over a JSONField ordering")
             if tuple(selected_fields) not in (
                 (ordering_field,),
                 (projection_ordering_field,),
