@@ -937,12 +937,7 @@ class CursorPagination(PaginationBase):
             if is_pk_ordering and last_value is None:
                 last_value = last_pk
 
-            if (
-                is_json_ordering
-                and last_value is None
-                and last_pk is not None
-                and await is_json_null_at(last_pk)
-            ):
+            if is_json_ordering and last_value is None and last_pk is not None and await is_json_null_at(last_pk):
                 raise ValueError(
                     "CursorPagination cannot create a cursor at a JSON null boundary; "
                     "use an explicitly typed scalar annotation for this ordering"
