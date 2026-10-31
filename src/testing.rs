@@ -250,10 +250,25 @@ pub struct TestAppState {
 }
 
 /// Rate-limit buckets that several test apps share. The WebSocket test client
-/// keeps one for each API.
+/// keeps one for each API. A test app reads `BOLT_RATE_LIMIT_IPV6_PREFIX`, and
+/// gets the buckets for that prefix. Thus a new prefix gives new buckets, as a
+/// restart of the server does.
 #[pyclass(frozen, name = "TestRateLimiters", module = "django_bolt._core")]
 #[derive(Default)]
-pub struct TestRateLimiters(Arc<RateLimiters>);
+pub struct TestRateLimiters(parking_lot::Mutex<Vec<Arc<RateLimiters>>>);
+
+impl TestRateLimiters {
+    /// The buckets for `ipv6_prefix`.
+    fn for_prefix(&self, ipv6_prefix: u8) -> Arc<RateLimiters> {
+        let mut sets = self.0.lock();
+        if let Some(set) = sets.iter().find(|set| set.ipv6_prefix() == ipv6_prefix) {
+            return Arc::clone(set);
+        }
+        let set = Arc::new(RateLimiters::new(ipv6_prefix));
+        sets.push(Arc::clone(&set));
+        set
+    }
+}
 
 #[pymethods]
 impl TestRateLimiters {
@@ -328,6 +343,7 @@ pub fn create_test_app(
         None => None,
     };
 
+    let ipv6_prefix = config.rate_limit_ipv6_prefix;
     let id = TEST_ID_GEN.fetch_add(1, Ordering::Relaxed);
     let app = TestAppState {
         router: Arc::new(Router::new()),
@@ -338,9 +354,10 @@ pub fn create_test_app(
         dispatch: dispatch.clone_ref(py),
         config,
         global_compression_config,
-        rate_limiters: rate_limiters
-            .map(|shared| Arc::clone(&shared.get().0))
-            .unwrap_or_default(),
+        rate_limiters: match rate_limiters {
+            Some(shared) => shared.get().for_prefix(ipv6_prefix),
+            None => Arc::new(RateLimiters::new(ipv6_prefix)),
+        },
         error_renderer,
     };
 
@@ -1122,6 +1139,7 @@ mod tests {
                 }),
                 global_cors_config: None,
                 trusted_proxies: Arc::new(TrustedProxies::parse(&[]).unwrap()),
+                rate_limit_ipv6_prefix: 64,
                 static_files_config: None,
                 media_files_config: None,
             },
