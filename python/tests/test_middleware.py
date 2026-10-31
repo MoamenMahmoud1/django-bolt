@@ -20,6 +20,7 @@ from django_bolt import BoltAPI, Router
 from django_bolt.auth import APIKeyAuthentication, IsAuthenticated, JWTAuthentication
 from django_bolt.middleware import DjangoMiddlewareStack, Middleware, cors, middleware, rate_limit, skip_middleware
 from django_bolt.params import Cookie, Header
+from django_bolt.responses import HTML, JSON, PlainText
 from django_bolt.testing import TestClient
 
 
@@ -736,6 +737,162 @@ class TestMiddlewareIntegration:
         assert cors_config["headers"] == ["Content-Type", "Authorization", "X-Custom"]
         assert cors_config["credentials"]
         assert cors_config["max_age"] == 7200
+
+
+class ContentTypeRecorder(Middleware):
+    """Record the Content-Type that Python middleware reads from a response."""
+
+    seen: list = []
+
+    async def process_request(self, request):
+        response = await self.get_response(request)
+        content_types = [value for key, value in response.headers.items() if key.lower() == "content-type"]
+        type(self).seen.append(content_types)
+        return response
+
+
+class CsvContentType(Middleware):
+    """Set a Content-Type with another letter case than Bolt uses."""
+
+    async def process_request(self, request):
+        response = await self.get_response(request)
+        response.headers["Content-Type"] = "text/csv"
+        return response
+
+
+@pytest.mark.parametrize(
+    ("path", "content_type"),
+    [
+        ("/html", "text/html; charset=utf-8"),
+        ("/plain", "text/plain; charset=utf-8"),
+        ("/bytes", "application/octet-stream"),
+        ("/str", "text/plain; charset=utf-8"),
+        ("/json", "application/json"),
+        ("/json-with-header", "application/json"),
+        ("/plain-with-cookie", "text/plain; charset=utf-8"),
+        ("/empty", None),
+    ],
+)
+def test_python_middleware_reads_the_content_type_of_a_built_in_response(path, content_type):
+    """Python middleware reads the Content-Type that the client gets."""
+    ContentTypeRecorder.seen = []
+    api = BoltAPI(middleware=[ContentTypeRecorder])
+
+    @api.get("/html")
+    async def html():
+        return HTML("<p>x</p>")
+
+    @api.get("/plain")
+    def plain():
+        return PlainText("x")
+
+    @api.get("/bytes")
+    async def raw_bytes() -> bytes:
+        return b"raw"
+
+    @api.get("/str")
+    async def text() -> str:
+        return "hello"
+
+    @api.get("/json")
+    async def json_body() -> dict:
+        return {"a": 1}
+
+    @api.get("/json-with-header")
+    async def json_with_header():
+        return JSON({"a": 1}, headers={"x-extra": "1"})
+
+    @api.get("/plain-with-cookie")
+    async def plain_with_cookie():
+        return PlainText("x").set_cookie("flavor", "oat")
+
+    @api.get("/empty", status_code=204)
+    async def empty():
+        return None
+
+    with TestClient(api) as client:
+        response = client.get(path)
+
+    assert response.headers.get("content-type") == content_type
+    assert ContentTypeRecorder.seen == [[content_type] if content_type else []]
+
+
+class XmlContentType(Middleware):
+    """Read the Content-Type in one letter case, and set it in another."""
+
+    seen: list = []
+
+    async def process_request(self, request):
+        response = await self.get_response(request)
+        type(self).seen.append(response.headers.get("CONTENT-TYPE"))
+        response.headers["content-type"] = "application/xml"
+        return response
+
+
+def test_python_middleware_headers_ignore_the_letter_case_of_a_name():
+    """The last write of a header wins, whatever letter case each write uses."""
+    XmlContentType.seen = []
+    # The first middleware runs last on the response.
+    api = BoltAPI(middleware=[XmlContentType, CsvContentType])
+
+    @api.get("/html")
+    async def html():
+        return HTML("<p>x</p>")
+
+    with TestClient(api) as client:
+        response = client.get("/html")
+
+    assert XmlContentType.seen == ["text/csv"]
+    assert response.headers.get_list("content-type") == ["application/xml"]
+
+
+class DropContentType(Middleware):
+    """Delete the Content-Type, or set it to an empty value."""
+
+    async def process_request(self, request):
+        response = await self.get_response(request)
+        if request.query.get("how") == "empty":
+            response.headers["Content-Type"] = ""
+        else:
+            del response.headers["Content-Type"]
+        return response
+
+
+@pytest.mark.parametrize("how", ["delete", "empty"])
+@pytest.mark.parametrize(
+    "django_middleware",
+    [None, ["django.middleware.clickjacking.XFrameOptionsMiddleware"]],
+    ids=["python", "python+django"],
+)
+def test_python_middleware_removes_the_content_type(how, django_middleware):
+    """A Content-Type that middleware deletes or empties is not sent."""
+    api = BoltAPI(middleware=[DropContentType], django_middleware=django_middleware)
+
+    @api.get("/html")
+    async def html():
+        return HTML("<p>x</p>")
+
+    with TestClient(api) as client:
+        response = client.get("/html", params={"how": how})
+
+    assert response.status_code == 200
+    assert "content-type" not in response.headers
+    assert response.text == "<p>x</p>"
+
+
+def test_python_middleware_replaces_the_content_type_in_any_letter_case():
+    """A Content-Type that middleware sets wins over the one of the response."""
+    api = BoltAPI(middleware=[CsvContentType])
+
+    @api.get("/html")
+    async def html():
+        return HTML("<p>x</p>")
+
+    with TestClient(api) as client:
+        response = client.get("/html")
+
+    assert response.headers.get_list("content-type") == ["text/csv"]
+    assert response.text == "<p>x</p>"
 
 
 if __name__ == "__main__":
