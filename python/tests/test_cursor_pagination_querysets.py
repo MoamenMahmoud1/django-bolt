@@ -385,10 +385,16 @@ def test_json_null_and_sql_null_cursor_cross_page_boundaries(descending, kind, s
         schema_editor.create_model(_JSONOrderingProbe)
     try:
         for value in [
-            None, None,  # SQL NULL
+            None,
+            None,  # SQL NULL
             Value(None, output_field=models.JSONField()),
             Value(None, output_field=models.JSONField()),  # JSON null
-            "hello", "hello", {"x": 1}, {"x": 1}, [2], False,
+            "hello",
+            "hello",
+            {"x": 1},
+            {"x": 1},
+            [2],
+            False,
         ]:
             _JSONOrderingProbe.objects.create(payload=value)
 
@@ -413,8 +419,9 @@ def test_json_null_and_sql_null_cursor_cross_page_boundaries(descending, kind, s
         expected = list(make_queryset().order_by(sort_order, pk_order).values_list("id", flat=True))
         expected_values = list(make_queryset().order_by(sort_order, pk_order).values_list(ordering, flat=True))
         json_null_ids = set(
-            _JSONOrderingProbe.objects.filter(payload=Value(None, output_field=models.JSONField()))
-            .values_list("id", flat=True)
+            _JSONOrderingProbe.objects.filter(payload=Value(None, output_field=models.JSONField())).values_list(
+                "id", flat=True
+            )
         )
         assert len(json_null_ids) == 2
 
