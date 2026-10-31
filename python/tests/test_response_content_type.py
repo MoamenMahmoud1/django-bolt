@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 
+import msgspec
 import pytest
 
 from django_bolt import JSON, BoltAPI
@@ -219,3 +220,93 @@ def test_python_middleware_gets_bytes_like_content_as_bytes(body_type):
 
     assert response.status_code == 200
     assert response.content == b"RAW"
+
+
+class Item(msgspec.Struct):
+    id: int
+
+
+class Created(JSON):
+    """A JSON subclass with another default status."""
+
+    def __init__(self, data):
+        super().__init__(data, status_code=201)
+
+
+class Csv(Response):
+    def __init__(self, content):
+        super().__init__(content, media_type="text/csv")
+
+
+class Text(PlainText):
+    pass
+
+
+class Moved(Redirect):
+    def __init__(self, url):
+        super().__init__(url, status_code=301)
+
+
+class Download(FileResponse):
+    def __init__(self, path):
+        super().__init__(path, filename="download.txt")
+
+
+def test_subclass_of_a_response_type_serializes_as_its_base_type(tmp_path):
+    """Bolt finds the response type of a subclass, and the route validates its data."""
+    data_file = tmp_path / "data.txt"
+    data_file.write_bytes(b"file body")
+    api = BoltAPI()
+
+    @api.get("/created", status_code=201)
+    async def created() -> Item:
+        return Created({"id": 1, "extra": "dropped"})
+
+    @api.get("/created-sync", status_code=201)
+    def created_sync() -> Item:
+        return Created({"id": 2, "extra": "dropped"})
+
+    @api.get("/created-awaits", status_code=201)
+    async def created_awaits() -> Item:
+        await asyncio.sleep(0)
+        return Created({"id": 3, "extra": "dropped"})
+
+    @api.get("/csv")
+    async def csv():
+        return Csv(b"a,b")
+
+    @api.get("/text")
+    async def text():
+        return Text("hi")
+
+    @api.get("/moved")
+    async def moved():
+        return Moved("/new")
+
+    @api.get("/download")
+    async def download():
+        return Download(str(data_file))
+
+    with TestClient(api) as client:
+        for path, item_id in (("/created", 1), ("/created-sync", 2), ("/created-awaits", 3)):
+            response = client.get(path)
+            assert response.status_code == 201, (path, response.text)
+            assert response.json() == {"id": item_id}
+
+        response = client.get("/csv")
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "text/csv"
+        assert response.content == b"a,b"
+
+        response = client.get("/text")
+        assert response.headers["content-type"] == "text/plain; charset=utf-8"
+        assert response.text == "hi"
+
+        response = client.get("/moved", follow_redirects=False)
+        assert response.status_code == 301
+        assert response.headers["location"] == "/new"
+
+        response = client.get("/download")
+        assert response.status_code == 200
+        assert response.headers["content-disposition"] == 'attachment; filename="download.txt"'
+        assert response.content == b"file body"
