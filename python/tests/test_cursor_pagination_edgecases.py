@@ -160,6 +160,26 @@ def test_datetime_ties_complete():
 
 
 @pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("ordering", "invalid_value"),
+    [
+        ("-created_at", "not-a-datetime"),
+        ("is_published", {"invalid": "boolean"}),
+    ],
+)
+def test_invalid_composite_ordering_value_resets_to_first_page(ordering, invalid_value):
+    _seed()
+    cursor = CursorPagination()._encode_cursor({"value": invalid_value, "pk": 1}, kind="composite-v2")
+    with TestClient(_api(ordering)) as client:
+        first = client.get("/cursor-edge")
+        malformed = client.get("/cursor-edge?cursor=" + quote(cursor, safe=""))
+    assert first.status_code == malformed.status_code == 200
+    assert malformed.json()["items"] == first.json()["items"]
+    assert malformed.json()["has_previous"] is False
+    assert malformed.json()["next_cursor"] == first.json()["next_cursor"]
+
+
+@pytest.mark.django_db(transaction=True)
 def test_invalid_composite_pk_resets_to_first_page():
     _seed()
     cursor = CursorPagination()._encode_cursor({"value": "A", "pk": "invalid-pk"}, kind="composite-v2")

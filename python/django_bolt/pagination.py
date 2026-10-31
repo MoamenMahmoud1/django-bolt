@@ -811,6 +811,14 @@ class CursorPagination(PaginationBase):
                 if cursor_pk is None:
                     raise ValueError("Missing cursor primary key")
                 value = cursor_value.value
+                if (
+                    value is not None
+                    and value is not _CURSOR_JSON_NULL
+                    and sort_field is not None
+                    and sort_field.concrete
+                    and not is_json_ordering
+                ):
+                    value = sort_field.to_python(value)
                 # Older composite cursors did not distinguish the two NULLs.
                 if is_json_ordering and value is None and await is_json_null_at(cursor_pk):
                     value = _CURSOR_JSON_NULL

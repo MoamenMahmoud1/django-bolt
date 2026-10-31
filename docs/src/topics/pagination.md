@@ -84,8 +84,8 @@ Query: `/articles?cursor=eyJ2IjoxMDB9`
 
 For non-primary-key ordering, `CursorPagination` uses the primary key to break
 sorting ties, so a page boundary cannot skip rows sharing an ordering value.
-Treat cursor strings as opaque. Old scalar cursors are accepted, but cannot
-identify a particular row among equal ordering values.
+Treat cursor strings as opaque. Bolt still accepts old scalar cursors.
+An old scalar cursor cannot identify one row among equal ordering values.
 
 For `.values()` and `.values_list()`, include the ordering field in
 the projection. Foreign-key ordering compares the stored ID, not the related
