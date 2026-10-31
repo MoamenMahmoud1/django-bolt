@@ -710,18 +710,25 @@ class CursorPagination(PaginationBase):
         # A single projected ordering/grouping key is already unique in
         # these two cases; otherwise fail clearly rather than lose rows.
         grouped_or_distinct = projected and bool(queryset.query.distinct or queryset.query.group_by)
+
+        # Top-level JSON null and SQL NULL both become None in Python, so a
+        # cursor cannot reliably distinguish their positions. Accept typed
+        # scalar annotations of JSON values instead of silently skipping rows.
+        ordering_output_field = sort_field
+        if ordering_output_field is None:
+            annotation = queryset.query.annotations.get(ordering_field)
+            if annotation is not None:
+                try:
+                    ordering_output_field = annotation.output_field
+                except FieldError as exc:
+                    raise ValueError("CursorPagination cannot resolve annotation ordering type") from exc
+        if ordering_output_field is not None and ordering_output_field.get_internal_type() == "JSONField":
+            raise ValueError(
+                "CursorPagination JSONField ordering cannot distinguish JSON null from SQL NULL; "
+                "order by an explicitly typed scalar annotation instead"
+            )
+
         if grouped_or_distinct and not is_pk_ordering:
-            # JSON null and SQL NULL are indistinguishable in projected results.
-            ordering_output_field = sort_field
-            if ordering_output_field is None:
-                annotation = queryset.query.annotations.get(ordering_field)
-                if annotation is not None:
-                    try:
-                        ordering_output_field = annotation.output_field
-                    except FieldError as exc:
-                        raise ValueError("CursorPagination cannot resolve annotation ordering type") from exc
-            if ordering_output_field is not None and ordering_output_field.get_internal_type() == "JSONField":
-                raise ValueError("CursorPagination cannot paginate DISTINCT/GROUP BY over a JSONField ordering")
             if tuple(selected_fields) not in (
                 (ordering_field,),
                 (projection_ordering_field,),

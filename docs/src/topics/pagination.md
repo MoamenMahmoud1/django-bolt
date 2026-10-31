@@ -92,9 +92,12 @@ the projection. Foreign-key ordering uses the stored ID, not the related model o
 returned items. Single-key `DISTINCT` and `GROUP BY` projections are pageable
 when their ordering field uniquely identifies each result; other grouped or
 distinct projections raise `ValueError`. A `DISTINCT` projection with additional non-grouped selected annotations is also rejected to avoid silently dropping rows. NULL ordering values are supported.
-JSONField ordering (including JSON-valued annotations) is rejected for
-`DISTINCT` and `GROUP BY` projections because SQL NULL and JSON null cannot
-be distinguished in projected cursor values.
+Direct `JSONField` ordering (including JSON-typed annotations) is rejected
+for cursor pagination because JSON `null` and SQL `NULL` both deserialize
+to Python `None`. To order by JSON-derived values, use an explicitly typed
+scalar annotation (for example, `Cast("payload", output_field=TextField())`)
+and set `ordering` to its alias. This supports ordinary and projected
+querysets without conflating the two kinds of null.
 
 Combined querysets such as `union()` retain first-page support only.
 Django does not allow `filter()` after `union()`, so an emitted `next_cursor`

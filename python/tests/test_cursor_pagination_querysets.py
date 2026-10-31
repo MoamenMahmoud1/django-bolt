@@ -3,8 +3,9 @@
 from urllib.parse import quote
 
 import pytest
-from django.db import models
+from django.db import connection, models
 from django.db.models import Case, Count, F, IntegerField, Value, When
+from django.db.models.functions import Cast
 
 from django_bolt import BoltAPI, CursorPagination, paginate
 from django_bolt.testing import TestClient
@@ -351,16 +352,22 @@ async def test_grouped_aggregate_sort_alias_rejected_without_unique_group_key():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["distinct", "grouped"])
+@pytest.mark.parametrize("kind", ["model", "values", "values_list", "distinct", "grouped"])
 @pytest.mark.parametrize("source", ["field", "annotation"])
-async def test_jsonfield_grouped_or_distinct_ordering_rejected(kind, source):
+async def test_jsonfield_ordering_rejected_before_cursor_can_skip_rows(kind, source):
     queryset = _JSONOrderingProbe.objects.all()
     ordering = "payload"
     if source == "annotation":
         queryset = queryset.annotate(json_sort=F("payload"))
         ordering = "json_sort"
-    queryset = queryset.values(ordering)
-    queryset = queryset.distinct() if kind == "distinct" else queryset.annotate(total=Count("id"))
+    if kind == "values":
+        queryset = queryset.values(ordering)
+    elif kind == "values_list":
+        queryset = queryset.values_list(ordering, flat=True)
+    elif kind == "distinct":
+        queryset = queryset.values(ordering).distinct()
+    elif kind == "grouped":
+        queryset = queryset.values(ordering).annotate(total=Count("id"))
 
     class ByJSON(CursorPagination):
         pass
@@ -369,3 +376,57 @@ async def test_jsonfield_grouped_or_distinct_ordering_rejected(kind, source):
 
     with pytest.raises(ValueError, match="JSONField ordering"):
         await ByJSON().paginate_queryset(queryset, {"query": {}})
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("descending", [False, True])
+def test_typed_json_sort_allows_sql_null_json_null_and_ties(descending):
+    # A JSONField cannot distinguish these NULLs once loaded as Python None.
+    # Casting to text gives distinct, stable cursor values across page breaks.
+    with connection.schema_editor() as schema_editor:
+        schema_editor.create_model(_JSONOrderingProbe)
+
+    try:
+        for value in [None, Value(None, output_field=models.JSONField()), {"x": 1}, {"x": 1}, "hello"]:
+            _JSONOrderingProbe.objects.create(payload=value)
+
+        ordering = "-sort_key" if descending else "sort_key"
+        queryset = _JSONOrderingProbe.objects.annotate(sort_key=Cast("payload", output_field=models.TextField()))
+        pk_order = "-id" if descending else "id"
+        expected_ids = list(queryset.order_by(ordering, pk_order).values_list("id", flat=True))
+
+        api = BoltAPI()
+
+        class Page(CursorPagination):
+            page_size = 1
+
+        Page.ordering = ordering
+
+        @api.get("/cursor-json-typed")
+        @paginate(Page)
+        async def list_json(request):
+            queryset = _JSONOrderingProbe.objects.annotate(sort_key=Cast("payload", output_field=models.TextField()))
+            return queryset.values("id", "sort_key")
+
+        found_ids = []
+        cursor = None
+        with TestClient(api) as client:
+            for _ in range(len(expected_ids) + 1):
+                path = "/cursor-json-typed"
+                if cursor is not None:
+                    path += "?cursor=" + quote(cursor, safe="")
+                response = client.get(path)
+                assert response.status_code == 200, response.text
+                result = response.json()
+                found_ids.extend(row["id"] for row in result["items"])
+                cursor = result.get("next_cursor")
+                if not result["has_next"]:
+                    break
+            else:
+                pytest.fail("Typed JSON cursor did not terminate")
+
+        assert found_ids == expected_ids
+        assert len(found_ids) == len(set(found_ids))
+    finally:
+        with connection.schema_editor() as schema_editor:
+            schema_editor.delete_model(_JSONOrderingProbe)
