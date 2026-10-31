@@ -809,12 +809,16 @@ class CursorPagination(PaginationBase):
                 cursor_value = _CompositeCursor(cursor_value.value, cursor_pk)
             except (TypeError, ValueError, OverflowError, ValidationError):
                 cursor_value = None  # Invalid cursor: behave like the first page.
-            if is_json_ordering and cursor_value is not None and cursor_value.value is None:
-                if await is_json_null_at(cursor_value.pk):
-                    raise ValueError(
-                        "CursorPagination cannot continue from a JSON null cursor; "
-                        "use an explicitly typed scalar annotation for this ordering"
-                    )
+            if (
+                is_json_ordering
+                and cursor_value is not None
+                and cursor_value.value is None
+                and await is_json_null_at(cursor_value.pk)
+            ):
+                raise ValueError(
+                    "CursorPagination cannot continue from a JSON null cursor; "
+                    "use an explicitly typed scalar annotation for this ordering"
+                )
         elif cursor_value is _CURSOR_NULL and (not grouped_or_distinct or is_pk_ordering):
             cursor_value = None
 
@@ -933,12 +937,16 @@ class CursorPagination(PaginationBase):
             if is_pk_ordering and last_value is None:
                 last_value = last_pk
 
-            if is_json_ordering and last_value is None and last_pk is not None:
-                if await is_json_null_at(last_pk):
-                    raise ValueError(
-                        "CursorPagination cannot create a cursor at a JSON null boundary; "
-                        "use an explicitly typed scalar annotation for this ordering"
-                    )
+            if (
+                is_json_ordering
+                and last_value is None
+                and last_pk is not None
+                and await is_json_null_at(last_pk)
+            ):
+                raise ValueError(
+                    "CursorPagination cannot create a cursor at a JSON null boundary; "
+                    "use an explicitly typed scalar annotation for this ordering"
+                )
 
             if use_pk_tiebreaker and last_pk is not None:
                 # NULL is a valid sort value, not the absence of a cursor.
