@@ -1,5 +1,6 @@
 """Cursor pagination across values_list(), aggregates, and nullable orderings."""
 
+import asyncio
 from urllib.parse import quote
 
 import pytest
@@ -352,21 +353,17 @@ async def test_grouped_aggregate_sort_alias_rejected_without_unique_group_key():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["model", "values", "values_list", "distinct", "grouped"])
+@pytest.mark.parametrize("kind", ["distinct", "grouped"])
 @pytest.mark.parametrize("source", ["field", "annotation"])
-async def test_jsonfield_ordering_rejected_before_cursor_can_skip_rows(kind, source):
+async def test_jsonfield_grouped_or_distinct_ordering_is_rejected(kind, source):
     queryset = _JSONOrderingProbe.objects.all()
     ordering = "payload"
     if source == "annotation":
         queryset = queryset.annotate(json_sort=F("payload"))
         ordering = "json_sort"
-    if kind == "values":
-        queryset = queryset.values(ordering)
-    elif kind == "values_list":
-        queryset = queryset.values_list(ordering, flat=True)
-    elif kind == "distinct":
+    if kind == "distinct":
         queryset = queryset.values(ordering).distinct()
-    elif kind == "grouped":
+    else:
         queryset = queryset.values(ordering).annotate(total=Count("id"))
 
     class ByJSON(CursorPagination):
@@ -376,6 +373,38 @@ async def test_jsonfield_ordering_rejected_before_cursor_can_skip_rows(kind, sou
 
     with pytest.raises(ValueError, match="JSONField ordering"):
         await ByJSON().paginate_queryset(queryset, {"query": {}})
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("kind", ["model", "values", "values_list"])
+@pytest.mark.parametrize("source", ["field", "annotation"])
+def test_json_null_cursor_boundary_fails_without_skipping(kind, source):
+    with connection.schema_editor() as schema_editor:
+        schema_editor.create_model(_JSONOrderingProbe)
+    try:
+        for _ in range(3):
+            _JSONOrderingProbe.objects.create(payload=Value(None, output_field=models.JSONField()))
+        _JSONOrderingProbe.objects.create(payload=None)  # SQL NULL stays distinct.
+
+        queryset = _JSONOrderingProbe.objects.filter(payload=Value(None, output_field=models.JSONField()))
+        ordering = "payload"
+        if source == "annotation":
+            queryset = queryset.annotate(json_sort=F("payload"))
+            ordering = "json_sort"
+        if kind == "values":
+            queryset = queryset.values(ordering)
+        elif kind == "values_list":
+            queryset = queryset.values_list(ordering, flat=True)
+
+        class ByJSON(CursorPagination):
+            page_size = 1
+
+        ByJSON.ordering = ordering
+        with pytest.raises(ValueError, match="JSON null boundary"):
+            asyncio.run(ByJSON().paginate_queryset(queryset, {"query": {}}))
+    finally:
+        with connection.schema_editor() as schema_editor:
+            schema_editor.delete_model(_JSONOrderingProbe)
 
 
 @pytest.mark.django_db(transaction=True)

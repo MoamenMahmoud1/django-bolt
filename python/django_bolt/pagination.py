@@ -32,7 +32,7 @@ from typing import Any, Generic, NamedTuple, TypeVar, get_args, get_origin
 import msgspec
 from django.core.exceptions import FieldDoesNotExist, FieldError, ValidationError
 from django.db import connections
-from django.db.models import F, Q
+from django.db.models import F, Q, Value
 from django.db.models.fields.tuple_lookups import (
     Tuple,
     TupleGreaterThan,
@@ -722,11 +722,11 @@ class CursorPagination(PaginationBase):
                     ordering_output_field = annotation.output_field
                 except FieldError as exc:
                     raise ValueError("CursorPagination cannot resolve annotation ordering type") from exc
-        if ordering_output_field is not None and ordering_output_field.get_internal_type() == "JSONField":
-            raise ValueError(
-                "CursorPagination JSONField ordering cannot distinguish JSON null from SQL NULL; "
-                "order by an explicitly typed scalar annotation instead"
-            )
+        is_json_ordering = (
+            ordering_output_field is not None and ordering_output_field.get_internal_type() == "JSONField"
+        )
+        if grouped_or_distinct and not is_pk_ordering and is_json_ordering:
+            raise ValueError("CursorPagination cannot paginate DISTINCT/GROUP BY over a JSONField ordering")
 
         if grouped_or_distinct and not is_pk_ordering:
             if tuple(selected_fields) not in (
@@ -789,6 +789,16 @@ class CursorPagination(PaginationBase):
         )
         lookup = "lt" if is_descending else "gt"
 
+        async def is_json_null_at(pk: Any) -> bool:
+            # Query the database only for a NULL cursor boundary. Django
+            # deserializes both JSON null and SQL NULL to Python None.
+            return await run_in_orm_executor(
+                lambda: queryset.filter(
+                    pk=pk,
+                    **{ordering_field: Value(None, output_field=ordering_output_field)},
+                ).exists()
+            )
+
         if isinstance(cursor_value, _CompositeCursor):
             if not use_pk_tiebreaker:
                 raise ValueError("Composite cursor is not valid for this ordering")
@@ -799,6 +809,12 @@ class CursorPagination(PaginationBase):
                 cursor_value = _CompositeCursor(cursor_value.value, cursor_pk)
             except (TypeError, ValueError, OverflowError, ValidationError):
                 cursor_value = None  # Invalid cursor: behave like the first page.
+            if is_json_ordering and cursor_value is not None and cursor_value.value is None:
+                if await is_json_null_at(cursor_value.pk):
+                    raise ValueError(
+                        "CursorPagination cannot continue from a JSON null cursor; "
+                        "use an explicitly typed scalar annotation for this ordering"
+                    )
         elif cursor_value is _CURSOR_NULL and (not grouped_or_distinct or is_pk_ordering):
             cursor_value = None
 
@@ -916,6 +932,13 @@ class CursorPagination(PaginationBase):
 
             if is_pk_ordering and last_value is None:
                 last_value = last_pk
+
+            if is_json_ordering and last_value is None and last_pk is not None:
+                if await is_json_null_at(last_pk):
+                    raise ValueError(
+                        "CursorPagination cannot create a cursor at a JSON null boundary; "
+                        "use an explicitly typed scalar annotation for this ordering"
+                    )
 
             if use_pk_tiebreaker and last_pk is not None:
                 # NULL is a valid sort value, not the absence of a cursor.
