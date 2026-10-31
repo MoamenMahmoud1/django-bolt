@@ -70,7 +70,6 @@ class _CompositeCursor(NamedTuple):
     pk: Any
 
 
-
 class PaginatedResponse(msgspec.Struct, Generic[T], omit_defaults=True):  # noqa: UP046 — PEP 695 params are unresolvable under PEP 563
     """
     Standard paginated response structure.

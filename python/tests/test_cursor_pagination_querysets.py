@@ -354,10 +354,7 @@ async def test_grouped_aggregate_sort_alias_rejected_without_unique_group_key():
 @pytest.mark.parametrize("kind", ["distinct", "grouped"])
 async def test_jsonfield_grouped_or_distinct_ordering_rejected(kind):
     queryset = _JSONOrderingProbe.objects.values("payload")
-    if kind == "distinct":
-        queryset = queryset.distinct()
-    else:
-        queryset = queryset.annotate(total=Count("id"))
+    queryset = queryset.distinct() if kind == "distinct" else queryset.annotate(total=Count("id"))
 
     class ByJSON(CursorPagination):
         ordering = "payload"

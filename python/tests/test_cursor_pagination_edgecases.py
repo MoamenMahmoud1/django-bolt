@@ -183,7 +183,6 @@ def test_legacy_json_values_are_not_interpreted_as_structural_cursors():
     assert null_tagged is not None and null_tagged != json_null
 
 
-
 @pytest.mark.django_db(transaction=True)
 def test_legacy_json_object_cursor_uses_scalar_filter():
     _seed()
@@ -232,8 +231,10 @@ def test_union_values_first_page_retains_legacy_support():
     @api.get("/cursor-union")
     @paginate(Page)
     async def list_articles(request):
-        items = Article.objects.filter(author="A", title__startswith=PREFIX).values("author")
-        others = Article.objects.filter(author="B", title__startswith=PREFIX).values("author")
+        # Article.Meta.ordering applies inside UNION unless explicitly cleared.
+        # SQLite rejects ORDER BY in compound-query operands.
+        items = Article.objects.filter(author="A", title__startswith=PREFIX).order_by().values("author")
+        others = Article.objects.filter(author="B", title__startswith=PREFIX).order_by().values("author")
         return items.union(others)
 
     with TestClient(api) as client:
