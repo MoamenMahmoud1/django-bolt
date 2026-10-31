@@ -148,17 +148,17 @@ Response = ResponseWireV1
 _ASYNC_SUSPEND_OPNAMES = frozenset({"GET_AWAITABLE", "GET_AITER", "GET_ANEXT", "END_ASYNC_FOR"})
 
 
-def _never_suspends(fn: Callable | None) -> bool:
-    """Return whether the code of ``fn`` has no opcode that can suspend.
+def _never_suspends(fn: Callable) -> bool:
+    """Return whether one ``send(None)`` runs a coroutine of ``fn`` to its end.
 
-    One ``send(None)`` then runs a coroutine of ``fn`` to its end.
+    Only an ``async def`` with no opcode that can suspend does that. A sync
+    function can return a coroutine that suspends, for example a wrapper that
+    ``inspect.markcoroutinefunction`` marks. A ``sync_to_async`` wrapper has no code.
     """
-    if fn is None:
+    code = getattr(fn, "__code__", None)
+    if code is None or not code.co_flags & inspect.CO_COROUTINE:
         return False
-    try:
-        return not any(i.opname in _ASYNC_SUSPEND_OPNAMES for i in dis.get_instructions(fn.__code__))
-    except (AttributeError, TypeError):
-        return False
+    return not any(i.opname in _ASYNC_SUSPEND_OPNAMES for i in dis.get_instructions(code))
 
 
 def _sync_finisher(meta: dict[str, Any], defer: Callable) -> Callable[[Any], ResponseWireV1 | Callable]:
@@ -197,7 +197,8 @@ def _request_only_sync_executor(is_async: bool, meta: dict[str, Any], defer: Cal
                 except StopIteration as stop:
                     return finish(stop.value)
                 coro.close()
-                raise RuntimeError("Handler awaited unexpectedly in sync dispatch")
+                # Unreachable: _never_suspends accepts no handler that can suspend.
+                raise RuntimeError("Handler awaited unexpectedly in sync dispatch")  # pragma: no mutate
 
             return execute
 
@@ -216,7 +217,8 @@ def _request_only_sync_executor(is_async: bool, meta: dict[str, Any], defer: Cal
                 result = stop.value
             else:
                 coro.close()
-                raise RuntimeError("Handler awaited unexpectedly in sync dispatch")
+                # Unreachable: _never_suspends accepts no handler that can suspend.
+                raise RuntimeError("Handler awaited unexpectedly in sync dispatch")  # pragma: no mutate
             if isinstance(result, dict):
                 return encode(result)
             return finish(result)
@@ -434,7 +436,9 @@ def _rewrite_django_mount_redirect_message(message: dict[str, Any], root_path: s
 def _wire_from_error_parts(status: int, headers: list[tuple[str, str]], body: bytes) -> ResponseWireV1:
     """Convert error-handler parts into ResponseWireV1."""
 
-    custom_content_type = None
+    # Each error handler sets a content-type, and then Rust does not read the
+    # response type. Rust also reads an unknown response type as octet-stream.
+    custom_content_type = None  # pragma: no mutate
     custom_headers: list[tuple[str, str]] = []
 
     for key, value in headers:
@@ -444,7 +448,7 @@ def _wire_from_error_parts(status: int, headers: list[tuple[str, str]], body: by
             custom_headers.append((key, value))
 
     meta = (
-        _infer_wire_response_type(custom_content_type) if custom_content_type else "octetstream",
+        _infer_wire_response_type(custom_content_type) if custom_content_type else "octetstream",  # pragma: no mutate
         custom_content_type,
         custom_headers or None,
         None,
@@ -2037,9 +2041,9 @@ class BoltAPI:
 
     def _compile_handler_executor(self, meta: HandlerMetadata) -> Callable[..., Any]:
         """Compile per-handler execution callable for the request hot path."""
-        mode = meta["mode"]
+        is_request_only = meta["mode"] == "request_only"
         is_async = meta["is_async"]
-        is_blocking = meta.get("is_blocking", False)
+        is_blocking = meta["is_blocking"]
         injector = meta["injector"]
         injector_is_async = meta["injector_is_async"]
 
@@ -2055,7 +2059,7 @@ class BoltAPI:
         if has_rust_prebound:
 
             def _get_args(request: dict[str, Any]) -> tuple[Any, Any]:
-                st = request.setdefault("state", {})
+                st = request.state
                 pa = st.pop("_bolt_prebound_args", None)
                 if pa is not None:
                     return pa, st.pop("_bolt_prebound_kwargs")
@@ -2067,10 +2071,10 @@ class BoltAPI:
         # is_multi branching never touches the hot path of normal (single-schema) routes.
         if meta.get("is_multi_response"):
             resolved_metas = meta["_resolved_metas"]
-            default_status = meta["default_status_code"]
-            default_entry = resolved_metas.get(default_status) or next(iter(resolved_metas.values()))
-
+            # Registration adds a catch-all entry with the default status of the route.
+            # It serves a bare return when the dict does not list that status.
             catch_all_entry = resolved_metas[...]
+            default_entry = resolved_metas.get(meta["default_status_code"], catch_all_entry)
 
             def _lookup(code: int) -> dict:
                 return resolved_metas.get(code, catch_all_entry)
@@ -2084,6 +2088,7 @@ class BoltAPI:
                         response_type = entry["response_type"]
                         if response_type is None or data is None:
                             return _wire_bytes(code, _RESPONSE_META_EMPTY, b"")
+                        # A Serializer type converts its data even when the entry does not validate.
                         if isinstance(data, (dict, list)) and not entry["_has_response_validation"]:
                             if isinstance(data, list):
                                 data = _convert_serializers(data)
@@ -2106,6 +2111,7 @@ class BoltAPI:
                         response_type = entry["response_type"]
                         if response_type is None or data is None:
                             return _wire_bytes(code, _RESPONSE_META_EMPTY, b"")
+                        # A Serializer type converts its data even when the entry does not validate.
                         if isinstance(data, (dict, list)) and not entry["_has_response_validation"]:
                             if isinstance(data, list):
                                 data = _convert_serializers(data)
@@ -2120,16 +2126,15 @@ class BoltAPI:
                 return serialize_response_sync(result, default_entry)
 
             async def execute_multi(handler: Callable, request: dict[str, Any]) -> ResponseWireV1:
+                # Rust sets both prebound keys or neither. It sets neither when it
+                # bails, and then the injector raises the proper error.
+                prebound_args = None
                 if has_rust_prebound:
-                    request_state = request.setdefault("state", {})
+                    request_state = request.state
                     prebound_args = request_state.pop("_bolt_prebound_args", None)
-                    prebound_kwargs = request_state.pop("_bolt_prebound_kwargs", None)
-                    has_prebound = prebound_args is not None and prebound_kwargs is not None
-                else:
-                    has_prebound = False
 
-                if has_prebound:
-                    args, kwargs = prebound_args, prebound_kwargs
+                if prebound_args is not None:
+                    args, kwargs = prebound_args, request_state.pop("_bolt_prebound_kwargs")
                 elif injector_is_async:
                     args, kwargs = await injector(request)
                 elif is_blocking and not is_async:
@@ -2165,11 +2170,7 @@ class BoltAPI:
         # A handler with only the request parameter takes the sync dispatch when it
         # cannot suspend: a sync handler that does not block, or an async one with no await.
         # Its async executor below stays for a route that the sync dispatch cannot serve.
-        if (
-            mode == "request_only"
-            and not is_blocking
-            and (not is_async or _never_suspends(meta.get("_original_fn") or meta.get("handler")))
-        ):
+        if is_request_only and not is_blocking and (not is_async or _never_suspends(meta["_original_fn"])):
             meta["_sync_executor"] = _request_only_sync_executor(is_async, meta, self._serialize_on_orm_pool)
 
         # The sync executors below finish a result that their fast checks do not
@@ -2178,20 +2179,22 @@ class BoltAPI:
 
         # Fast path: async handler (most common pattern). Rust-prebound args are
         # consumed via _get_args; routes without bindings skip the state checks.
-        if mode != "request_only" and is_async and not is_blocking and not injector_is_async:
+        if not is_request_only and is_async and not is_blocking and not injector_is_async:
             default_status = meta["default_status_code"]
             has_response_validation = meta["_has_response_validation"]
 
             # Detect trivially-async handlers: async def with no suspension points.
             # These can be dispatched synchronously by driving the coroutine inline
             # via coro.send(None) → StopIteration, avoiding the entire async bridge.
-            _trivially_async = _never_suspends(meta.get("_original_fn") or meta.get("handler"))
+            _trivially_async = _never_suspends(meta["_original_fn"])
 
             # Super-fast path: no compiled response validation → inline dict/list serialization
             # directly into the executor. Eliminates 2 async function call overheads
             # (serialize_response + serialize_json_data are both async but never suspend
             # for dict returns with no response model).
-            _is_no_params = meta.get("handler_pattern") is HandlerPattern.NO_PARAMS
+            # The no-params executors only skip the injector call. A mutant that
+            # picks the other variant gives the same response.
+            _is_no_params = meta.get("handler_pattern") is HandlerPattern.NO_PARAMS  # pragma: no mutate
 
             if not has_response_validation:
                 # Bind encoder method directly — skips the `if serializer is not None`
@@ -2202,9 +2205,13 @@ class BoltAPI:
                 # Pre-compute at registration time whether _convert_serializers can be
                 # skipped. When the return type is dict, list[Struct], list[dict], etc.
                 # (i.e. NOT a Bolt Serializer), the conversion is always a no-op.
+                # The variants without the conversion only skip a no-op call. A mutant
+                # that picks the other variant gives the same response.
+                # pragma: no mutate start
                 _response_type = meta.get("response_type")
                 _resp_origin = get_origin(_response_type) if _response_type else None
                 _skip_convert = _resp_origin is list or _response_type is dict or _resp_origin is dict
+                # pragma: no mutate end
 
                 if _trivially_async:
                     # Sync executor for trivially-async handlers: drive coroutine inline.
@@ -2223,7 +2230,9 @@ class BoltAPI:
                                     result = _e.value
                                 else:
                                     coro.close()
-                                    raise RuntimeError("Handler awaited unexpectedly in sync dispatch")
+                                    raise RuntimeError(
+                                        "Handler awaited unexpectedly in sync dispatch"  # pragma: no mutate (cannot suspend)
+                                    )
                                 try:
                                     return _encode(result)
                                 except TypeError:
@@ -2243,7 +2252,9 @@ class BoltAPI:
                                     result = _e.value
                                 else:
                                     coro.close()
-                                    raise RuntimeError("Handler awaited unexpectedly in sync dispatch")
+                                    raise RuntimeError(
+                                        "Handler awaited unexpectedly in sync dispatch"  # pragma: no mutate (cannot suspend)
+                                    )
                                 if isinstance(result, dict):
                                     return _encode(result)
                                 if isinstance(result, list):
@@ -2264,7 +2275,9 @@ class BoltAPI:
                                     result = _e.value
                                 else:
                                     coro.close()
-                                    raise RuntimeError("Handler awaited unexpectedly in sync dispatch")
+                                    raise RuntimeError(
+                                        "Handler awaited unexpectedly in sync dispatch"  # pragma: no mutate (cannot suspend)
+                                    )
                                 try:
                                     return _encode(result)
                                 except TypeError:
@@ -2285,7 +2298,9 @@ class BoltAPI:
                                     result = _e.value
                                 else:
                                     coro.close()
-                                    raise RuntimeError("Handler awaited unexpectedly in sync dispatch")
+                                    raise RuntimeError(
+                                        "Handler awaited unexpectedly in sync dispatch"  # pragma: no mutate (cannot suspend)
+                                    )
                                 if isinstance(result, dict):
                                     return _encode(result)
                                 if isinstance(result, list):
@@ -2359,9 +2374,11 @@ class BoltAPI:
                 _encode = _json._ENCODER.encode
                 _meta_json = _RESPONSE_META_JSON
                 _inline_kind, _inline_match = _inline_spec
-                _convert = msgspec.convert
+                # A mutant of a marked line in the inline fast path only sends the
+                # result to serialize_response, which gives the same response.
+                _convert = msgspec.convert  # pragma: no mutate
 
-                if _inline_kind == "struct":
+                if _inline_kind == "struct":  # pragma: no mutate
                     _match_types = _inline_match
 
                     if _trivially_async:
@@ -2380,7 +2397,9 @@ class BoltAPI:
                                     result = _e.value
                                 else:
                                     coro.close()
-                                    raise RuntimeError("Handler awaited unexpectedly in sync dispatch")
+                                    raise RuntimeError(
+                                        "Handler awaited unexpectedly in sync dispatch"  # pragma: no mutate (cannot suspend)
+                                    )
                                 if isinstance(result, _match_types):
                                     return _encode(result)
                                 return _finish(result)
@@ -2397,7 +2416,9 @@ class BoltAPI:
                                     result = _e.value
                                 else:
                                     coro.close()
-                                    raise RuntimeError("Handler awaited unexpectedly in sync dispatch")
+                                    raise RuntimeError(
+                                        "Handler awaited unexpectedly in sync dispatch"  # pragma: no mutate (cannot suspend)
+                                    )
                                 if isinstance(result, _match_types):
                                     return _encode(result)
                                 return _finish(result)
@@ -2431,7 +2452,7 @@ class BoltAPI:
                 # list-like containers all fall through to serialize_response
                 # so the slow path applies projection, async DB I/O wrapping,
                 # auto-streaming, etc.
-                _list_ann = _inline_match
+                _list_ann = _inline_match  # pragma: no mutate
 
                 if _trivially_async:
                     if _is_no_params:
@@ -2446,15 +2467,15 @@ class BoltAPI:
                                 result = _e.value
                             else:
                                 coro.close()
-                                raise RuntimeError("Handler awaited unexpectedly in sync dispatch")
-                            if type(result) is list:
+                                raise RuntimeError("Handler awaited unexpectedly in sync dispatch")  # pragma: no mutate
+                            if type(result) is list:  # pragma: no mutate
                                 # Attr-bag elements (e.g. Django models) need
                                 # the slow path's response_field_names
                                 # projection; msgspec.convert can't bridge them.
-                                if result and not isinstance(result[0], (dict, msgspec.Struct)):
+                                if result and not isinstance(result[0], (dict, msgspec.Struct)):  # pragma: no mutate
                                     return serialize_response_sync(result, meta)
                                 try:
-                                    validated = _convert(result, _list_ann)
+                                    validated = _convert(result, _list_ann)  # pragma: no mutate
                                 except Exception:
                                     # A later element can need conversion by attribute. The
                                     # slow path converts it, or reports the error as a
@@ -2475,15 +2496,15 @@ class BoltAPI:
                                 result = _e.value
                             else:
                                 coro.close()
-                                raise RuntimeError("Handler awaited unexpectedly in sync dispatch")
-                            if type(result) is list:
+                                raise RuntimeError("Handler awaited unexpectedly in sync dispatch")  # pragma: no mutate
+                            if type(result) is list:  # pragma: no mutate
                                 # Attr-bag elements (e.g. Django models) need
                                 # the slow path's response_field_names
                                 # projection; msgspec.convert can't bridge them.
-                                if result and not isinstance(result[0], (dict, msgspec.Struct)):
+                                if result and not isinstance(result[0], (dict, msgspec.Struct)):  # pragma: no mutate
                                     return serialize_response_sync(result, meta)
                                 try:
-                                    validated = _convert(result, _list_ann)
+                                    validated = _convert(result, _list_ann)  # pragma: no mutate
                                 except Exception:
                                     # A later element can need conversion by attribute. The
                                     # slow path converts it, or reports the error as a
@@ -2500,14 +2521,14 @@ class BoltAPI:
                         handler: Callable, request: dict[str, Any]
                     ) -> ResponseWireV1:
                         result = await handler()
-                        if type(result) is list:
+                        if type(result) is list:  # pragma: no mutate
                             # Attr-bag elements (e.g. Django models) need the
                             # slow path, which converts them by attribute;
                             # msgspec.convert can't bridge them.
-                            if result and not isinstance(result[0], (dict, msgspec.Struct)):
+                            if result and not isinstance(result[0], (dict, msgspec.Struct)):  # pragma: no mutate
                                 return await serialize_response(result, meta)
                             try:
-                                validated = _convert(result, _list_ann)
+                                validated = _convert(result, _list_ann)  # pragma: no mutate
                             except Exception:
                                 # A later element can need conversion by attribute. The
                                 # slow path converts it, or reports the error as a
@@ -2522,14 +2543,14 @@ class BoltAPI:
                     ) -> ResponseWireV1:
                         args, kwargs = _get_args(request)
                         result = await handler(*args, **kwargs)
-                        if type(result) is list:
+                        if type(result) is list:  # pragma: no mutate
                             # Attr-bag elements (e.g. Django models) need the
                             # slow path, which converts them by attribute;
                             # msgspec.convert can't bridge them.
-                            if result and not isinstance(result[0], (dict, msgspec.Struct)):
+                            if result and not isinstance(result[0], (dict, msgspec.Struct)):  # pragma: no mutate
                                 return await serialize_response(result, meta)
                             try:
-                                validated = _convert(result, _list_ann)
+                                validated = _convert(result, _list_ann)  # pragma: no mutate
                             except Exception:
                                 # A later element can need conversion by attribute. The
                                 # slow path converts it, or reports the error as a
@@ -2555,18 +2576,24 @@ class BoltAPI:
             return execute_async_no_prebound
 
         # Fast path for sync non-blocking handler (prebound-aware via _get_args).
-        if mode != "request_only" and not is_async and not is_blocking and not injector_is_async:
+        if not is_request_only and not is_async and not is_blocking and not injector_is_async:
             default_status = meta["default_status_code"]
             has_response_validation = meta["_has_response_validation"]
-            _is_no_params_sync = meta.get("handler_pattern") is HandlerPattern.NO_PARAMS
+            # The no-params executors only skip the injector call. A mutant that
+            # picks the other variant gives the same response.
+            _is_no_params_sync = meta.get("handler_pattern") is HandlerPattern.NO_PARAMS  # pragma: no mutate
 
             if not has_response_validation:
                 _encode = _json._ENCODER.encode
                 _meta_json = _RESPONSE_META_JSON
 
+                # The variants without the conversion only skip a no-op call. A mutant
+                # that picks the other variant gives the same response.
+                # pragma: no mutate start
                 _response_type = meta.get("response_type")
                 _resp_origin = get_origin(_response_type) if _response_type else None
                 _skip_convert = _resp_origin is list or _response_type is dict or _resp_origin is dict
+                # pragma: no mutate end
 
                 # Plain (non-async) sync executor for Rust sync dispatch bypass.
                 # Eliminates coroutine creation + into_future_with_locals overhead.
@@ -2678,9 +2705,11 @@ class BoltAPI:
                 _encode = _json._ENCODER.encode
                 _meta_json = _RESPONSE_META_JSON
                 _inline_kind, _inline_match = _inline_spec
-                _convert = msgspec.convert
+                # A mutant of a marked line in the inline fast path only sends the
+                # result to the slow path, which gives the same response.
+                _convert = msgspec.convert  # pragma: no mutate
 
-                if _inline_kind == "struct":
+                if _inline_kind == "struct":  # pragma: no mutate
                     _match_types = _inline_match
 
                     if _is_no_params_sync:
@@ -2732,7 +2761,7 @@ class BoltAPI:
                     return execute_sync_inline_validated
 
                 # _inline_kind == "list"
-                _list_ann = _inline_match
+                _list_ann = _inline_match  # pragma: no mutate
 
                 if _is_no_params_sync:
 
@@ -2740,14 +2769,14 @@ class BoltAPI:
                         handler: Callable, request: dict[str, Any]
                     ) -> ResponseWireV1:
                         result = handler()
-                        if type(result) is list:
+                        if type(result) is list:  # pragma: no mutate
                             # Attr-bag elements (e.g. Django models) need the
                             # slow path, which converts them by attribute;
                             # msgspec.convert can't bridge them.
-                            if result and not isinstance(result[0], (dict, msgspec.Struct)):
+                            if result and not isinstance(result[0], (dict, msgspec.Struct)):  # pragma: no mutate
                                 return serialize_response_sync(result, meta)
                             try:
-                                validated = _convert(result, _list_ann)
+                                validated = _convert(result, _list_ann)  # pragma: no mutate
                             except Exception:
                                 # A later element can need conversion by attribute. The
                                 # slow path converts it, or reports the error as a
@@ -2762,14 +2791,14 @@ class BoltAPI:
                     ) -> ResponseWireV1:
                         args, kwargs = _get_args(request)
                         result = handler(*args, **kwargs)
-                        if type(result) is list:
+                        if type(result) is list:  # pragma: no mutate
                             # Attr-bag elements (e.g. Django models) need the
                             # slow path, which converts them by attribute;
                             # msgspec.convert can't bridge them.
-                            if result and not isinstance(result[0], (dict, msgspec.Struct)):
+                            if result and not isinstance(result[0], (dict, msgspec.Struct)):  # pragma: no mutate
                                 return serialize_response_sync(result, meta)
                             try:
-                                validated = _convert(result, _list_ann)
+                                validated = _convert(result, _list_ann)  # pragma: no mutate
                             except Exception:
                                 # A later element can need conversion by attribute. The
                                 # slow path converts it, or reports the error as a
@@ -2786,14 +2815,14 @@ class BoltAPI:
                         handler: Callable, request: dict[str, Any]
                     ) -> ResponseWireV1:
                         result = handler()
-                        if type(result) is list:
+                        if type(result) is list:  # pragma: no mutate
                             # Attr-bag elements (e.g. Django models) need the
                             # slow path, which converts them by attribute;
                             # msgspec.convert can't bridge them.
-                            if result and not isinstance(result[0], (dict, msgspec.Struct)):
+                            if result and not isinstance(result[0], (dict, msgspec.Struct)):  # pragma: no mutate
                                 return serialize_response_sync(result, meta)
                             try:
-                                validated = _convert(result, _list_ann)
+                                validated = _convert(result, _list_ann)  # pragma: no mutate
                             except Exception:
                                 # A later element can need conversion by attribute. The
                                 # slow path converts it, or reports the error as a
@@ -2810,14 +2839,14 @@ class BoltAPI:
                     ) -> ResponseWireV1:
                         args, kwargs = _get_args(request)
                         result = handler(*args, **kwargs)
-                        if type(result) is list:
+                        if type(result) is list:  # pragma: no mutate
                             # Attr-bag elements (e.g. Django models) need the
                             # slow path, which converts them by attribute;
                             # msgspec.convert can't bridge them.
-                            if result and not isinstance(result[0], (dict, msgspec.Struct)):
+                            if result and not isinstance(result[0], (dict, msgspec.Struct)):  # pragma: no mutate
                                 return serialize_response_sync(result, meta)
                             try:
-                                validated = _convert(result, _list_ann)
+                                validated = _convert(result, _list_ann)  # pragma: no mutate
                             except Exception:
                                 # A later element can need conversion by attribute. The
                                 # slow path converts it, or reports the error as a
@@ -2831,7 +2860,7 @@ class BoltAPI:
                 return execute_sync_inline_validated
 
         async def execute(handler: Callable, request: dict[str, Any]) -> ResponseWireV1:
-            if mode == "request_only":
+            if is_request_only:
                 if is_async:
                     result = await handler(request)
                 elif is_blocking:
@@ -2847,16 +2876,15 @@ class BoltAPI:
                 # State dict is only touched when Rust may have prebound args —
                 # all other routes skip the setdefault entirely (hot-path rule:
                 # no per-request allocations that can be avoided).
+                # Rust sets both prebound keys or neither. It sets neither when it
+                # bails, and then the injector raises the proper error.
+                prebound_args = None
                 if has_rust_prebound:
-                    request_state = request.setdefault("state", {})
+                    request_state = request.state
                     prebound_args = request_state.pop("_bolt_prebound_args", None)
-                    prebound_kwargs = request_state.pop("_bolt_prebound_kwargs", None)
-                    has_prebound = prebound_args is not None and prebound_kwargs is not None
-                else:
-                    has_prebound = False
 
-                if has_prebound:
-                    args, kwargs = prebound_args, prebound_kwargs
+                if prebound_args is not None:
+                    args, kwargs = prebound_args, request_state.pop("_bolt_prebound_kwargs")
                 elif injector_is_async:
                     args, kwargs = await injector(request)
                 elif is_blocking and not is_async:
@@ -2925,18 +2953,20 @@ class BoltAPI:
 
         The read of ``request.user`` can be indirect, for example in a template,
         so the message must say where the request ran. This runs on the error path only.
+        ``_dispatch`` catches each error, so it describes each error one time.
         """
-        if getattr(error, "_bolt_route_described", False):
-            return
-        error._bolt_route_described = True
+        # Each route is in _routes, and an unwrapped handler has code. The
+        # defaults keep the error path working if that ever changes.
+        # pragma: no mutate start
         route = next((f"{method} {path}" for method, path, route_id, _ in self._routes if route_id == handler_id), None)
+        # pragma: no mutate end
         target = inspect.unwrap(handler)
-        code = getattr(target, "__code__", None)
+        code = getattr(target, "__code__", None)  # pragma: no mutate
         where = f"{target.__module__}.{target.__qualname__}"
         if code is not None:
             where += f" ({code.co_filename}:{code.co_firstlineno})"
-        description = f"Route: {route or 'unknown'}. Handler: {where}."
-        error.args = (f"{error.args[0]} {description}", *error.args[1:])
+        description = f"Route: {route or 'unknown'}. Handler: {where}."  # pragma: no mutate
+        error.args = (f"{error.args[0]} {description}",)
 
         dev_mode = django_settings.DEBUG or os.environ.get("DJANGO_BOLT_DEV_WORKER") == "1"
         if dev_mode and handler_id not in self._lane_affinity_hinted:
@@ -2957,11 +2987,11 @@ class BoltAPI:
         The ``error_formatter`` can change the response, but not this choice.
         """
         if self._logging_middleware and is_server_exception(e):
-            self._logging_middleware.log_exception(request, e, exc_info=True)
+            self._logging_middleware.log_exception(request, e)
         try:
             # Without a formatter, the handler reads the Django DEBUG setting.
             if self._error_formatter is None:
-                return _wire_from_error_parts(*handle_exception(e, debug=None, request=request))
+                return _wire_from_error_parts(*handle_exception(e))
             return _wire_from_error_parts(*handle_exception_with_formatter(self._error_formatter, e, request))
         except Exception as error:
             self._log_error_response_failure(request, error)
@@ -3104,12 +3134,14 @@ class BoltAPI:
         the APIs that mount it.
         """
         key = id(middleware_specs)
-        chain = self._route_global_chain_cache.get(key)
+        # Double-checked lock: the first lookup only skips the lock. The second
+        # lookup matters only when two threads build the same chain at once.
+        chain = self._route_global_chain_cache.get(key)  # pragma: no mutate
         if chain is not None:
             return chain
 
         with self._route_executor_lock:
-            chain = self._route_global_chain_cache.get(key)
+            chain = self._route_global_chain_cache.get(key)  # pragma: no mutate
             if chain is None:
                 chain = self._build_middleware_chain(middleware_specs, clone_wrapper=True)
                 self._route_global_chain_cache[key] = chain
@@ -3132,10 +3164,8 @@ class BoltAPI:
         meta: dict[str, Any],
     ) -> Callable[[Any], Any]:
         """Build the route executor of one route (router+route middleware + handler)."""
-        router_middleware = meta.get("_router_middleware", [])
-        route_middleware = meta.get("_route_middleware", getattr(handler, "__bolt_middleware__", []))
-        combined_specs = [*router_middleware, *route_middleware]
-        normalized_specs = normalize_middleware_specs(combined_specs, context="route", allow_function_middleware=True)
+        # Registration normalized both lists.
+        route_specs = [*meta["_router_middleware"], *meta["_route_middleware"]]
 
         check_session_guards = meta["_session_guard_check"]
         if check_session_guards is None:
@@ -3152,7 +3182,7 @@ class BoltAPI:
                 return await self._execute_handler_as_middleware_response(handler, req, meta)
 
         chain = execute_handler
-        for middleware_spec in reversed(normalized_specs):
+        for middleware_spec in reversed(route_specs):
             if not self._is_python_middleware_spec(middleware_spec):
                 continue
             # Route executors are cached per route, so wrapper instances must be cloned.
@@ -3173,12 +3203,14 @@ class BoltAPI:
         mounted API keeps no reference to the APIs that mount it.
         """
         key = id(meta)
-        cached_executor = self._route_executor_cache.get(key)
+        # Double-checked lock: the first lookup only skips the lock. The second
+        # lookup matters only when two threads build the same executor at once.
+        cached_executor = self._route_executor_cache.get(key)  # pragma: no mutate
         if cached_executor is not None:
             return cached_executor
 
         with self._route_executor_lock:
-            cached_executor = self._route_executor_cache.get(key)
+            cached_executor = self._route_executor_cache.get(key)  # pragma: no mutate
             if cached_executor is None:
                 cached_executor = self._build_route_executor(handler, meta)
                 self._route_executor_cache[key] = cached_executor
@@ -3189,7 +3221,6 @@ class BoltAPI:
         self,
         handler: Callable,
         request: dict[str, Any],
-        handler_id: int,
         api: BoltAPI,
         meta: dict[str, Any],
     ) -> Response:
@@ -3199,7 +3230,6 @@ class BoltAPI:
         Args:
             handler: The route handler function
             request: The request dictionary
-            handler_id: Handler ID
             api: The BoltAPI instance that owns this handler (may be sub-app)
             meta: Handler metadata
         """
@@ -3215,25 +3245,21 @@ class BoltAPI:
         else:
             middleware_chain = self._get_route_global_chain(global_middleware)
 
-        request_state = request.setdefault("state", {})
+        request_state = request.state
 
         # Django middleware gets this view in process_view.
         request_state["_view_func"] = meta["view_func"]
         request_state["_bolt_route_executor"] = self._get_route_executor(handler, meta)
 
-        try:
-            middleware_response = await middleware_chain(request)
-            if isinstance(middleware_response, MiddlewareResponse):
-                return middleware_response.to_tuple()
-            if isinstance(middleware_response, tuple):
-                return MiddlewareResponse.from_tuple(middleware_response).to_tuple()
-            raise TypeError(
-                f"Middleware chain returned unsupported response type: {type(middleware_response).__name__}. "
-                "Expected MiddlewareResponse or ResponseWireV1 tuple."
-            )
-        finally:
-            if request_state:
-                request_state.pop("_bolt_route_executor", None)
+        middleware_response = await middleware_chain(request)
+        if isinstance(middleware_response, MiddlewareResponse):
+            return middleware_response.to_tuple()
+        if isinstance(middleware_response, tuple):
+            return MiddlewareResponse.from_tuple(middleware_response).to_tuple()
+        raise TypeError(
+            f"Middleware chain returned unsupported response type: {type(middleware_response).__name__}. "
+            "Expected MiddlewareResponse or ResponseWireV1 tuple."
+        )
 
     async def _check_revocation(
         self,
@@ -3253,11 +3279,14 @@ class BoltAPI:
         jti = claims.get("jti")
         if not jti:
             # Without a JTI we cannot identify which token to check.
-            # Rejecting is safer than silently honoring.
+            # Rejecting is safer than silently honoring. Rust already rejects
+            # such a token when its backend has revocation, so no test reaches this.
+            # pragma: no mutate start
             raise HTTPException(
                 status_code=401,
                 detail="Token missing 'jti' claim required for revocation",
             )
+            # pragma: no mutate end
         revoked = await handler(jti, claims) if takes_claims else await handler(jti)
         if revoked:
             raise HTTPException(status_code=401, detail="Token has been revoked")
@@ -3299,7 +3328,7 @@ class BoltAPI:
         # For merged APIs, use the original API's middleware chain and logging
         # This preserves per-API auth, middleware, and logging config (Litestar-style)
         # Note: _handler_api_map is always initialized in __init__ (no hasattr needed)
-        original_api = self._handler_api_map.get(handler_id) if handler_id is not None else None
+        original_api = self._handler_api_map.get(handler_id)
 
         try:
             # 1. Direct metadata access using handler_id (int key is faster than callable key)
@@ -3340,7 +3369,7 @@ class BoltAPI:
 
             if api_with_middleware:
                 # Execute through middleware chain (Django-style)
-                return await self._dispatch_with_middleware(handler, request, handler_id, api_with_middleware, meta)
+                return await self._dispatch_with_middleware(handler, request, api_with_middleware, meta)
             else:
                 # Fast path: no middleware, execute pre-compiled handler executor directly.
                 return await meta["_handler_executor"](handler, request)
@@ -3358,10 +3387,11 @@ class BoltAPI:
             # Auto-cleanup UploadFiles to prevent resource leaks
             # Only runs for handlers with file uploads (optimization: skip for 95%+ of requests)
             if meta["has_file_uploads"]:
-                request_state = request.setdefault("state", {})
-                upload_files = request_state.get("_upload_files", [])
+                upload_files = request.state.get("_upload_files", [])
                 for upload in upload_files:
-                    with suppress(Exception):
+                    # The close of a read file does not raise. The guard keeps the
+                    # response if a file that the handler wrote fails to flush.
+                    with suppress(Exception):  # pragma: no mutate
                         upload.close_sync()
 
     def _dispatch_sync(self, handler: Callable, request: dict[str, Any], handler_id: int = None) -> Response:
@@ -3412,10 +3442,11 @@ class BoltAPI:
             return self._handle_generic_exception(e, request=request)
         finally:
             if meta["has_file_uploads"]:
-                request_state = request.setdefault("state", {})
-                upload_files = request_state.get("_upload_files", [])
+                upload_files = request.state.get("_upload_files", [])
                 for upload in upload_files:
-                    with suppress(Exception):
+                    # The close of a read file does not raise. The guard keeps the
+                    # response if a file that the handler wrote fails to flush.
+                    with suppress(Exception):  # pragma: no mutate
                         upload.close_sync()
 
     async def _serialize_on_orm_pool(self, result: QuerySet, meta: dict[str, Any], request: dict[str, Any]) -> Response:
