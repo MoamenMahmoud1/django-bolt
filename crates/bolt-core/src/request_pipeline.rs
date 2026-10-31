@@ -19,7 +19,7 @@ use std::hash::Hash;
 
 use crate::form_parsing::ValidationError;
 use crate::responses;
-use crate::router::{QueryParams, QuerySequences};
+use crate::router::{PathParams, QueryParams, QuerySequences};
 use crate::type_coercion::{
     CoercedValue, CoercedValues, TYPE_STRING, TypeHints, coerce_param, coerced_value_to_py,
 };
@@ -35,7 +35,7 @@ pub static EMPTY_TYPES: std::sync::LazyLock<TypeHints> = std::sync::LazyLock::ne
 /// typed path parameter keeps its string. Returns the pre-coerced non-string
 /// values of each source. String parameters are validated for length but left as-is.
 pub fn validate_and_cache_typed_params<'t>(
-    path_params: Option<&AHashMap<String, String>>,
+    path_params: Option<&PathParams<'_>>,
     query_params: Option<&QueryParams<'_>>,
     path_types: &'t TypeHints,
     query_types: &'t TypeHints,
@@ -334,7 +334,10 @@ pub fn header_str(value: &HeaderValue) -> Option<&str> {
     if invalid {
         return None;
     }
-    std::str::from_utf8(bytes).ok()
+    // SAFETY: each byte is a tab or in 32..127, so the bytes are ASCII, and
+    // ASCII is valid UTF-8. A second UTF-8 check cost about 100 instructions
+    // for each header of a request.
+    Some(unsafe { std::str::from_utf8_unchecked(bytes) })
 }
 
 /// Extract headers from request with validation
@@ -495,6 +498,10 @@ mod tests {
             .collect()
     }
 
+    fn path_values<'a>(pairs: &[(&'a str, &'a str)]) -> PathParams<'a> {
+        pairs.iter().map(|(k, v)| (*k, Cow::Borrowed(*v))).collect()
+    }
+
     fn types(pairs: &[(&str, u8)]) -> TypeHints {
         pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
     }
@@ -637,7 +644,7 @@ mod tests {
     fn path_and_query_keep_their_labels() {
         let hints = types(&[("id", TYPE_INT)]);
         let none = types(&[]);
-        let bad = values(&[("id", "x")]);
+        let bad = path_values(&[("id", "x")]);
         let response =
             validate_and_cache_typed_params(Some(&bad), None, &hints, &none, 64).unwrap_err();
         assert!(detail(response).contains("Path parameter 'id'"));
@@ -651,7 +658,7 @@ mod tests {
     fn a_query_key_with_the_name_of_a_typed_path_parameter_keeps_its_string() {
         let path_hints = types(&[("id", TYPE_INT)]);
         let query_hints = types(&[]);
-        let path = values(&[("id", "5")]);
+        let path = path_values(&[("id", "5")]);
         let query = crate::router::parse_query_string("id=x");
         let (path_coerced, query_coerced) = validate_and_cache_typed_params(
             Some(&path),
@@ -738,5 +745,44 @@ mod tests {
                 400
             );
         }
+    }
+    /// The JSON body of a response.
+    fn json_body(response: HttpResponse) -> serde_json::Value {
+        let bytes = response.into_body().try_into_bytes().unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[test]
+    fn a_param_error_gives_a_422_that_names_its_source_and_value() {
+        let error = ParamError {
+            label: "Query parameter",
+            name: "page".to_string(),
+            msg: "Expected an integer".to_string(),
+        };
+        let response = error.into_response();
+        assert_eq!(response.status(), 422);
+        assert_eq!(
+            response.headers().get("content-type").unwrap(),
+            "application/json"
+        );
+        assert_eq!(
+            json_body(response),
+            serde_json::json!({"detail": "Query parameter 'page': Expected an integer"})
+        );
+    }
+
+    #[test]
+    fn a_validation_error_gives_a_422_with_the_error_in_a_list() {
+        let error = ValidationError::file_too_large("upload", 10, 20);
+        let response = build_validation_error_response(&error);
+        assert_eq!(response.status(), 422);
+        assert_eq!(
+            response.headers().get("content-type").unwrap(),
+            "application/json"
+        );
+        assert_eq!(
+            json_body(response),
+            serde_json::json!({"detail": [error.to_json()]})
+        );
     }
 }

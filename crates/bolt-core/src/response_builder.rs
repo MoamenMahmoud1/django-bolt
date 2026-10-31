@@ -3,11 +3,20 @@
 /// Reduces the number of mutations on HttpResponse::Builder
 /// by batching operations and pre-allocating capacity.
 use actix_web::body::MessageBody;
-use actix_web::http::header::{HeaderName, HeaderValue};
+use actix_web::http::header::{self, HeaderName, HeaderValue};
 use actix_web::{HttpResponse, HttpResponseBuilder, http::StatusCode};
+use bytes::Bytes;
 
 use crate::cookies::format_cookie;
 use crate::response_meta::ResponseMeta;
+
+/// The `Content-Encoding` marker that tells the compression middleware to skip.
+const IDENTITY: HeaderValue = HeaderValue::from_static("identity");
+
+/// The headers of a 429, parsed once.
+const X_RATELIMIT_LIMIT: HeaderName = HeaderName::from_static("x-ratelimit-limit");
+const X_RATELIMIT_BURST: HeaderName = HeaderName::from_static("x-ratelimit-burst");
+const APPLICATION_JSON: HeaderValue = HeaderValue::from_static("application/json");
 
 /// Build a streaming response with SSE headers.
 /// Pre-bundles common SSE headers to avoid multiple mutations.
@@ -62,14 +71,15 @@ pub fn build_rate_limit_response(
     retry_after: u64,
     rps: u32,
     burst: u32,
-    body: Vec<u8>,
+    body: Bytes,
 ) -> HttpResponse {
-    // Batch all headers at once
+    // The names are constants, and a number becomes a header value with no
+    // `String` between.
     HttpResponse::TooManyRequests()
-        .insert_header(("Retry-After", retry_after.to_string()))
-        .insert_header(("X-RateLimit-Limit", rps.to_string()))
-        .insert_header(("X-RateLimit-Burst", burst.to_string()))
-        .content_type("application/json")
+        .insert_header((header::RETRY_AFTER, HeaderValue::from(retry_after)))
+        .insert_header((X_RATELIMIT_LIMIT, HeaderValue::from(rps)))
+        .insert_header((X_RATELIMIT_BURST, HeaderValue::from(burst)))
+        .insert_header((header::CONTENT_TYPE, APPLICATION_JSON))
         .body(body)
 }
 
@@ -128,21 +138,26 @@ where
 {
     let mut builder = HttpResponse::build(status);
 
-    // 1. Content-Type: use custom or derive from response_type
-    let content_type = meta
-        .custom_content_type
-        .as_deref()
-        .unwrap_or_else(|| meta.response_type.content_type());
-
-    if !content_type.is_empty() {
-        builder.insert_header(("content-type", content_type));
+    // 1. Content-Type: use custom or derive from response_type. The header
+    // name is a constant, and a static type needs no copy of its value.
+    match meta.custom_content_type.as_deref() {
+        Some(content_type) => {
+            if !content_type.is_empty() {
+                builder.insert_header((header::CONTENT_TYPE, content_type));
+            }
+        }
+        None => {
+            if let Some(value) = meta.response_type.content_type_header() {
+                builder.insert_header((header::CONTENT_TYPE, value));
+            }
+        }
     }
 
-    // 2. Custom headers (lowercase keys in Rust - single location)
+    // 2. Custom headers. `HeaderName::from_bytes` gives a lower-case name,
+    // so the key needs no lower-case copy.
     if let Some(ref headers) = meta.custom_headers {
         for (k, v) in headers {
-            // Lowercase here instead of in Python (best practice from Robyn)
-            if let Ok(name) = HeaderName::try_from(k.to_ascii_lowercase())
+            if let Ok(name) = HeaderName::from_bytes(k.as_bytes())
                 && let Ok(val) = HeaderValue::try_from(v.as_str())
             {
                 builder.append_header((name, val));
@@ -154,7 +169,7 @@ where
     if let Some(ref cookies) = meta.cookies {
         for cookie in cookies {
             if let Some(header_value) = format_cookie(cookie) {
-                builder.append_header(("set-cookie", header_value));
+                builder.append_header((header::SET_COOKIE, header_value));
             }
             // Invalid cookies are logged and skipped by format_cookie
         }
@@ -162,7 +177,7 @@ where
 
     // 4. Compression skip if needed
     if skip_compression {
-        builder.insert_header(("content-encoding", "identity"));
+        builder.insert_header((header::CONTENT_ENCODING, IDENTITY));
     }
 
     // 5. A 204 has no body (RFC 9110 §15.3.5). Actix drops the content-length
@@ -251,7 +266,7 @@ mod tests {
 
     #[test]
     fn test_build_rate_limit_response() {
-        let response = build_rate_limit_response(60, 100, 200, b"{}".to_vec());
+        let response = build_rate_limit_response(60, 100, 200, Bytes::from_static(b"{}"));
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(values(&response, "retry-after"), ["60"]);
         assert_eq!(values(&response, "x-ratelimit-limit"), ["100"]);

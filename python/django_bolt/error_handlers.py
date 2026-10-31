@@ -84,36 +84,6 @@ def format_error_response(
     return _json_response(status_code, headers, error_body)
 
 
-def serialize_django_response(response: Any) -> tuple[int, list[tuple[str, str]], bytes]:
-    """Convert Django HttpResponse to response tuple.
-
-    This is called by middleware adapter when Django middleware returns an
-    HttpResponse (e.g., redirects from @login_required, CSRF failures, etc.).
-
-    Args:
-        response: Django HttpResponse instance
-
-    Returns:
-        Tuple of (status_code, headers, body)
-    """
-    status_code = response.status_code
-
-    # Extract headers from Django response
-    headers: list[tuple[str, str]] = []
-    for header, value in response.items():
-        headers.append((header.lower(), value))
-
-    # Get response content
-    if hasattr(response, "content"):
-        body = response.content
-        if isinstance(body, str):
-            body = body.encode("utf-8")
-    else:
-        body = b""
-
-    return status_code, headers, body
-
-
 def http_exception_handler(exc: HTTPException) -> tuple[int, list[tuple[str, str]], bytes]:
     """Convert an HTTPException to a response tuple.
 
@@ -140,11 +110,13 @@ def _loc_segments(path: str) -> list[str]:
     return [seg for seg in _RE_PATH_SPLIT.split(path.replace("]", "")) if seg and seg != "$"]
 
 
-def msgspec_validation_error_to_dict(error: msgspec.ValidationError) -> list[dict[str, Any]]:
+def msgspec_validation_error_to_dict(error: msgspec.ValidationError, root: str = "body") -> list[dict[str, Any]]:
     """Convert msgspec ValidationError to structured error list.
 
     Args:
         error: msgspec.ValidationError instance
+        root: The first item of each 'loc'. A request error has "body", and a
+            response error has "response".
 
     Returns:
         List of error dictionaries with 'loc', 'msg', 'type' fields
@@ -162,34 +134,35 @@ def msgspec_validation_error_to_dict(error: msgspec.ValidationError) -> list[dic
         suffix = error_msg[len(str(cause)) :]
         loc_match = _RE_AT_LOCATION.search(suffix)
         prefix = _loc_segments(loc_match.group(1)) if loc_match else []
-        return [{**err, "loc": ["body", *prefix, *err["loc"][1:]]} for err in cause.errors()]
+        return [{**err, "loc": [root, *prefix, *err["loc"][1:]]} for err in cause.errors()]
 
     # Try to extract field location with pre-compiled regex
     loc_match = _RE_AT_LOCATION.search(error_msg)
     if loc_match:
         msg_part = error_msg[: loc_match.start()]
-        loc_parts = ["body", *_loc_segments(loc_match.group(1))]
+        loc_parts = [root, *_loc_segments(loc_match.group(1))]
         return [{"loc": loc_parts, "msg": msg_part, "type": "validation_error"}]
 
     if "missing required field" in error_msg.lower():
         match = _RE_FIELD_NAME.search(error_msg)
         field = match.group(1) if match else "unknown"
-        return [{"loc": ["body", field], "msg": error_msg, "type": "missing_field"}]
+        return [{"loc": [root, field], "msg": error_msg, "type": "missing_field"}]
 
-    return [{"loc": ["body"], "msg": error_msg, "type": "validation_error"}]
+    return [{"loc": [root], "msg": error_msg, "type": "validation_error"}]
 
 
 def _format_validation_errors(errors: Any, loc: str) -> list[dict[str, Any]]:
     """Convert the errors of a validation exception to dicts with 'loc', 'msg' and 'type'.
 
-    ``loc`` is the location of an error that does not give one.
+    ``loc`` is the first item of the location of each error, and the whole
+    location of an error that does not give one.
     """
     formatted_errors = []
     for error in errors:
         if isinstance(error, dict):
             formatted_errors.append(error)
         elif isinstance(error, msgspec.ValidationError):
-            formatted_errors.extend(msgspec_validation_error_to_dict(error))
+            formatted_errors.extend(msgspec_validation_error_to_dict(error, loc))
         else:
             formatted_errors.append({"loc": [loc], "msg": str(error), "type": "validation_error"})
     return formatted_errors
@@ -241,11 +214,16 @@ def request_validation_error_handler(
 
 def response_validation_error_handler(
     exc: ResponseValidationError,
+    debug: bool = False,
 ) -> tuple[int, list[tuple[str, str]], bytes]:
     """Handle ResponseValidationError and convert to 500 response.
 
+    The errors name the model, the fields and the types of the handler. Thus
+    the response shows them only in debug mode. The server log always has them.
+
     Args:
         exc: ResponseValidationError instance
+        debug: Whether to include the validation errors in the response
 
     Returns:
         Tuple of (status_code, headers, body)
@@ -254,7 +232,7 @@ def response_validation_error_handler(
     return format_error_response(
         status_code=500,
         detail="Response validation error",
-        extra={"validation_errors": _format_validation_errors(exc.errors(), "response")},
+        extra={"validation_errors": _format_validation_errors(exc.errors(), "response")} if debug else None,
     )
 
 
@@ -341,6 +319,16 @@ def is_server_exception(exc: BaseException) -> bool:
     return not isinstance(exc, _CLIENT_ERROR_TYPES)
 
 
+def _resolve_debug(debug: bool | None) -> bool:
+    """Return ``debug``, or the Django DEBUG setting when ``debug`` is None."""
+    if debug is not None:
+        return debug
+    try:
+        return django_settings.DEBUG if django_settings and django_settings.configured else False
+    except (ImportError, AttributeError):
+        return False
+
+
 def handle_exception(
     exc: Exception,
     debug: bool | None = None,
@@ -358,18 +346,14 @@ def handle_exception(
         Tuple of (status_code, headers, body)
     """
     # Check Django's DEBUG setting dynamically only if debug is not explicitly set
-    if debug is None:
-        try:
-            debug = django_settings.DEBUG if django_settings and django_settings.configured else False
-        except (ImportError, AttributeError):
-            debug = False
+    debug = _resolve_debug(debug)
 
     if isinstance(exc, HTTPException):
         return http_exception_handler(exc)
     elif isinstance(exc, RequestValidationError):
         return request_validation_error_handler(exc)
     elif isinstance(exc, ResponseValidationError):
-        return response_validation_error_handler(exc)
+        return response_validation_error_handler(exc, debug=debug)
     elif isinstance(exc, ValidationException):
         # Generic validation exception
         return request_validation_error_handler(RequestValidationError(exc.errors()))
@@ -458,6 +442,7 @@ class BoltError(msgspec.Struct, frozen=True, kw_only=True):
             "payload_too_large", "response_validation" or "internal_error".
         detail: A message for a human. Bolt does not put internal data, such as a file path, in it.
         errors: The field errors. Each one is a dict with "loc", "msg" and "type", and some have "ctx".
+            A "response_validation" error has none when DEBUG is off.
         headers: The headers that the error needs, for example WWW-Authenticate
             or Retry-After. Bolt adds them to the response of the formatter.
         extra: The ``extra`` of an HTTPException, or ``{"retry_after": n}`` for
@@ -552,8 +537,13 @@ def problem_details(error: BoltError, request: Any) -> Response:
     return Response(body, status_code=error.status, media_type="application/problem+json")
 
 
-def bolt_error_from_exception(exc: BaseException) -> BoltError:
-    """Describe the error response for an exception, as ``handle_exception`` sends it."""
+def bolt_error_from_exception(exc: BaseException, debug: bool | None = None) -> BoltError:
+    """Describe the error response for an exception, as ``handle_exception`` sends it.
+
+    A formatter can send ``errors`` to the client. Thus a response validation
+    error has no ``errors`` unless ``debug`` is true. If ``debug`` is None, it
+    is the Django DEBUG setting. ``exception`` always has the errors.
+    """
     if isinstance(exc, HTTPException):
         return BoltError(
             status=exc.status_code,
@@ -568,7 +558,7 @@ def bolt_error_from_exception(exc: BaseException) -> BoltError:
             status=500,
             kind="response_validation",
             detail="Response validation error",
-            errors=_format_validation_errors(exc.errors(), "response"),
+            errors=_format_validation_errors(exc.errors(), "response") if _resolve_debug(debug) else [],
             exception=exc,
         )
     if isinstance(exc, ValidationException):
@@ -660,7 +650,8 @@ def _log_formatted_error(error: BoltError) -> None:
     It does not log an HTTPException.
     """
     if error.kind == "response_validation":
-        _log_response_validation_error(error.exception, error.errors)
+        # error.errors is empty when DEBUG is off, so the log reads the exception.
+        _log_response_validation_error(error.exception, _format_validation_errors(error.exception.errors(), "response"))
     elif DjangoSuspiciousOperation is not None and isinstance(error.exception, DjangoSuspiciousOperation):
         _log_suspicious_operation(error.exception)
     elif (
