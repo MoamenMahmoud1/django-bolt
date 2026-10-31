@@ -1,6 +1,7 @@
 """Cursor pagination across values_list(), aggregates, and nullable orderings."""
 
-import asyncio
+import base64
+import json
 from urllib.parse import quote
 
 import pytest
@@ -376,32 +377,141 @@ async def test_jsonfield_grouped_or_distinct_ordering_is_rejected(kind, source):
 
 
 @pytest.mark.django_db(transaction=True)
-@pytest.mark.parametrize("kind", ["model", "values", "values_list"])
+@pytest.mark.parametrize("descending", [False, True])
+@pytest.mark.parametrize("kind", ["model", "values", "tuple", "named", "flat"])
 @pytest.mark.parametrize("source", ["field", "annotation"])
-def test_json_null_cursor_boundary_fails_without_skipping(kind, source):
+def test_json_null_and_sql_null_cursor_cross_page_boundaries(descending, kind, source):
     with connection.schema_editor() as schema_editor:
         schema_editor.create_model(_JSONOrderingProbe)
     try:
-        for _ in range(3):
-            _JSONOrderingProbe.objects.create(payload=Value(None, output_field=models.JSONField()))
-        _JSONOrderingProbe.objects.create(payload=None)  # SQL NULL stays distinct.
+        for value in [
+            None, None,  # SQL NULL
+            Value(None, output_field=models.JSONField()),
+            Value(None, output_field=models.JSONField()),  # JSON null
+            "hello", "hello", {"x": 1}, {"x": 1}, [2], False,
+        ]:
+            _JSONOrderingProbe.objects.create(payload=value)
 
-        queryset = _JSONOrderingProbe.objects.filter(payload=Value(None, output_field=models.JSONField()))
-        ordering = "payload"
-        if source == "annotation":
-            queryset = queryset.annotate(json_sort=F("payload"))
-            ordering = "json_sort"
-        if kind == "values":
-            queryset = queryset.values(ordering)
-        elif kind == "values_list":
-            queryset = queryset.values_list(ordering, flat=True)
+        ordering = "json_sort" if source == "annotation" else "payload"
+        sort_order = "-" + ordering if descending else ordering
+        pk_order = "-pk" if descending else "pk"
 
-        class ByJSON(CursorPagination):
+        def make_queryset():
+            queryset = _JSONOrderingProbe.objects.all()
+            if source == "annotation":
+                queryset = queryset.annotate(json_sort=F("payload"))
+            if kind == "values":
+                return queryset.values("id", ordering)
+            if kind == "tuple":
+                return queryset.values_list("id", ordering)
+            if kind == "named":
+                return queryset.values_list("id", ordering, named=True)
+            if kind == "flat":
+                return queryset.values_list(ordering, flat=True)
+            return queryset
+
+        expected = list(make_queryset().order_by(sort_order, pk_order).values_list("id", flat=True))
+        expected_values = list(make_queryset().order_by(sort_order, pk_order).values_list(ordering, flat=True))
+        json_null_ids = set(
+            _JSONOrderingProbe.objects.filter(payload=Value(None, output_field=models.JSONField()))
+            .values_list("id", flat=True)
+        )
+        assert len(json_null_ids) == 2
+
+        api = BoltAPI()
+
+        class Page(CursorPagination):
             page_size = 1
 
-        ByJSON.ordering = ordering
-        with pytest.raises(ValueError, match="JSON null boundary"):
-            asyncio.run(ByJSON().paginate_queryset(queryset, {"query": {}}))
+        Page.ordering = sort_order
+
+        @api.get("/cursor-json-mixed")
+        @paginate(Page)
+        async def items(request):
+            return make_queryset()
+
+        ids, values, cursor, tagged_nulls = [], [], None, 0
+        with TestClient(api) as client:
+            for _ in range(len(expected) + 1):
+                path = "/cursor-json-mixed"
+                if cursor:
+                    path += "?cursor=" + quote(cursor, safe="")
+                response = client.get(path)
+                assert response.status_code == 200, response.text
+                data = response.json()
+                for row in data["items"]:
+                    if kind == "flat":
+                        values.append(row)
+                    elif kind in {"tuple", "named"}:
+                        ids.append(row[0])
+                    else:
+                        ids.append(row["id"])
+                cursor = data["next_cursor"]
+                if cursor:
+                    payload = json.loads(base64.b64decode(cursor))
+                    if payload.get("t") == "composite-json-null-v1":
+                        tagged_nulls += 1
+                        assert payload["v"]["pk"] in json_null_ids
+                if not data["has_next"]:
+                    break
+            else:
+                pytest.fail("JSON cursor traversal did not terminate")
+
+        if kind == "flat":
+            assert values == expected_values
+        else:
+            assert ids == expected
+            assert len(ids) == len(set(ids))
+        assert tagged_nulls >= 1
+    finally:
+        with connection.schema_editor() as schema_editor:
+            schema_editor.delete_model(_JSONOrderingProbe)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("descending", [False, True])
+@pytest.mark.parametrize("boundary_type", ["json_null", "sql_null"])
+def test_legacy_composite_null_cursor_keeps_its_boundary(descending, boundary_type):
+    with connection.schema_editor() as schema_editor:
+        schema_editor.create_model(_JSONOrderingProbe)
+    try:
+        for value in [
+            None,
+            None,
+            Value(None, output_field=models.JSONField()),
+            Value(None, output_field=models.JSONField()),
+            "hello",
+        ]:
+            _JSONOrderingProbe.objects.create(payload=value)
+
+        queryset = _JSONOrderingProbe.objects.all()
+        ordering = "-payload" if descending else "payload"
+        pk_order = "-pk" if descending else "pk"
+        expected = list(queryset.order_by(ordering, pk_order).values_list("pk", flat=True))
+        if boundary_type == "json_null":
+            boundary = queryset.filter(payload=Value(None, output_field=models.JSONField()))
+        else:
+            boundary = queryset.filter(payload__isnull=True)
+        boundary_pk = boundary.order_by(pk_order).values_list("pk", flat=True).first()
+        expected_after = expected[expected.index(boundary_pk) + 1 :]
+
+        api = BoltAPI()
+
+        class Page(CursorPagination):
+            page_size = 2
+
+        Page.ordering = ordering
+
+        @api.get("/cursor-json-legacy-null")
+        @paginate(Page)
+        async def items(request):
+            return _JSONOrderingProbe.objects.all().values("pk", "payload")
+
+        old_cursor = Page()._encode_cursor({"value": None, "pk": boundary_pk}, kind="composite-v2")
+        with TestClient(api) as client:
+            response = client.get("/cursor-json-legacy-null?cursor=" + quote(old_cursor, safe=""))
+        assert response.status_code == 200, response.text
+        assert [row["pk"] for row in response.json()["items"]] == expected_after[:2]
     finally:
         with connection.schema_editor() as schema_editor:
             schema_editor.delete_model(_JSONOrderingProbe)

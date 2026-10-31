@@ -220,6 +220,29 @@ def test_legacy_json_object_cursor_uses_scalar_filter():
 
 
 @pytest.mark.django_db(transaction=True)
+def test_composite_cursor_on_pk_ordering_starts_from_first_page():
+    _seed()
+    api = BoltAPI()
+
+    class ByPK(CursorPagination):
+        ordering = "-id"
+        page_size = 2
+
+    @api.get("/cursor-pk-only")
+    @paginate(ByPK)
+    async def articles(request):
+        return Article.objects.filter(title__startswith=PREFIX)
+
+    bogus = ByPK()._encode_cursor({"value": 1, "pk": 1}, kind="composite-v2")
+    with TestClient(api) as client:
+        expected = client.get("/cursor-pk-only")
+        response = client.get("/cursor-pk-only?cursor=" + quote(bogus, safe=""))
+    assert response.status_code == 200, response.text
+    assert response.json()["items"] == expected.json()["items"]
+    assert response.json()["has_next"] is True
+
+
+@pytest.mark.django_db(transaction=True)
 def test_union_values_first_page_retains_legacy_support():
     """UNION supports first-page slicing; Django rejects filter() on later pages."""
     _seed()

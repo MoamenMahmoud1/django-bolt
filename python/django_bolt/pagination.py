@@ -63,6 +63,7 @@ __all__ = [
 T = TypeVar("T")
 _PAGINATION_UNSET = object()
 _CURSOR_NULL = object()
+_CURSOR_JSON_NULL = object()
 
 
 class _CompositeCursor(NamedTuple):
@@ -626,9 +627,13 @@ class CursorPagination(PaginationBase):
             if not isinstance(data, dict):
                 return None
             value = data.get("v")
-            if data.get("t") == "composite-v2":
+            if data.get("t") in {"composite-v2", "composite-json-null-v1"}:
                 if not isinstance(value, dict) or set(value) != {"value", "pk"}:
                     return None
+                if data["t"] == "composite-json-null-v1":
+                    if value["value"] is not None:
+                        return None
+                    return _CompositeCursor(_CURSOR_JSON_NULL, value["pk"])
                 return _CompositeCursor(value["value"], value["pk"])
             if data.get("t") == "null-v2":
                 return _CURSOR_NULL if value is None else None
@@ -711,9 +716,8 @@ class CursorPagination(PaginationBase):
         # these two cases; otherwise fail clearly rather than lose rows.
         grouped_or_distinct = projected and bool(queryset.query.distinct or queryset.query.group_by)
 
-        # Top-level JSON null and SQL NULL both become None in Python, so a
-        # cursor cannot reliably distinguish their positions. Accept typed
-        # scalar annotations of JSON values instead of silently skipping rows.
+        # Top-level JSON null and SQL NULL both become None in Python.
+        # Distinguish them at page boundaries without querying every row.
         ordering_output_field = sort_field
         if ordering_output_field is None:
             annotation = queryset.query.annotations.get(ordering_field)
@@ -800,25 +804,19 @@ class CursorPagination(PaginationBase):
             )
 
         if isinstance(cursor_value, _CompositeCursor):
-            if not use_pk_tiebreaker:
-                raise ValueError("Composite cursor is not valid for this ordering")
             try:
+                if not use_pk_tiebreaker or (cursor_value.value is _CURSOR_JSON_NULL and not is_json_ordering):
+                    raise ValueError("Composite cursor is not valid for this ordering")
                 cursor_pk = pk_field.to_python(cursor_value.pk)
                 if cursor_pk is None:
                     raise ValueError("Missing cursor primary key")
-                cursor_value = _CompositeCursor(cursor_value.value, cursor_pk)
+                value = cursor_value.value
+                # Older composite cursors did not distinguish the two NULLs.
+                if is_json_ordering and value is None and await is_json_null_at(cursor_pk):
+                    value = _CURSOR_JSON_NULL
+                cursor_value = _CompositeCursor(value, cursor_pk)
             except (TypeError, ValueError, OverflowError, ValidationError):
                 cursor_value = None  # Invalid cursor: behave like the first page.
-            if (
-                is_json_ordering
-                and cursor_value is not None
-                and cursor_value.value is None
-                and await is_json_null_at(cursor_value.pk)
-            ):
-                raise ValueError(
-                    "CursorPagination cannot continue from a JSON null cursor; "
-                    "use an explicitly typed scalar annotation for this ordering"
-                )
         elif cursor_value is _CURSOR_NULL and (not grouped_or_distinct or is_pk_ordering):
             cursor_value = None
 
@@ -845,7 +843,9 @@ class CursorPagination(PaginationBase):
             except FieldDoesNotExist:  # annotation/expression, so assume nullable
                 nullable = True
             null_lookup = f"{ordering_field}__isnull"
-            same_value = Q(**{null_lookup: True}) if value is None else Q(**{ordering_field: value})
+            # A JSON null is a non-SQL-NULL value in database ordering.
+            boundary = Value(None, output_field=ordering_output_field) if value is _CURSOR_JSON_NULL else value
+            same_value = Q(**{null_lookup: True}) if value is None else Q(**{ordering_field: boundary})
             tie = same_value & Q(**{f"pk__{lookup}": cursor_pk})
             if connections[queryset.db].vendor == "postgresql" and value is not None and (not nullable or nulls_first):
                 # A PostgreSQL composite B-tree can use the row comparison as
@@ -854,14 +854,14 @@ class CursorPagination(PaginationBase):
                 # Preserve the existing NULL-aware Q fallback when needed.
                 row = Tuple(F(ordering_field), F(pk_field.attname))
                 comparison = TupleLessThan if is_descending else TupleGreaterThan
-                ordered_qs = ordered_qs.filter(comparison(row, (value, cursor_pk)))
+                ordered_qs = ordered_qs.filter(comparison(row, (boundary, cursor_pk)))
             else:
                 if value is None:
                     after_cursor = tie
                     if nulls_first:
                         after_cursor |= Q(**{null_lookup: False})
                 else:
-                    after_cursor = Q(**{f"{ordering_field}__{lookup}": value}) | tie
+                    after_cursor = Q(**{f"{ordering_field}__{lookup}": boundary}) | tie
                     if nullable and not nulls_first:
                         after_cursor |= Q(**{null_lookup: True})
                 ordered_qs = ordered_qs.filter(after_cursor)
@@ -937,15 +937,22 @@ class CursorPagination(PaginationBase):
             if is_pk_ordering and last_value is None:
                 last_value = last_pk
 
-            if is_json_ordering and last_value is None and last_pk is not None and await is_json_null_at(last_pk):
-                raise ValueError(
-                    "CursorPagination cannot create a cursor at a JSON null boundary; "
-                    "use an explicitly typed scalar annotation for this ordering"
-                )
+            if (
+                is_json_ordering
+                and use_pk_tiebreaker
+                and last_value is None
+                and last_pk is not None
+                and await is_json_null_at(last_pk)
+            ):
+                last_value = _CURSOR_JSON_NULL
 
             if use_pk_tiebreaker and last_pk is not None:
-                # NULL is a valid sort value, not the absence of a cursor.
-                next_cursor = self._encode_cursor({"value": last_value, "pk": last_pk}, kind="composite-v2")
+                # Keep SQL NULL in the old envelope; tag only JSON null.
+                json_null = last_value is _CURSOR_JSON_NULL
+                next_cursor = self._encode_cursor(
+                    {"value": None if json_null else last_value, "pk": last_pk},
+                    kind="composite-json-null-v1" if json_null else "composite-v2",
+                )
             elif grouped_or_distinct and not is_pk_ordering and last_value is None:
                 next_cursor = self._encode_cursor(None, kind="null-v2")
             elif last_value is not None:
