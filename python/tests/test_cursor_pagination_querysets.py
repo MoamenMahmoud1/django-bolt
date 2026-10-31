@@ -446,14 +446,15 @@ def test_json_null_and_sql_null_cursor_cross_page_boundaries(descending, kind, s
                         ids.append(row[0])
                     else:
                         ids.append(row["id"])
-                cursor = data["next_cursor"]
-                if cursor:
-                    payload = json.loads(base64.b64decode(cursor))
-                    if payload.get("t") == "composite-json-null-v1":
-                        tagged_nulls += 1
-                        assert payload["v"]["pk"] in json_null_ids
+                cursor = data.get("next_cursor")
                 if not data["has_next"]:
+                    assert cursor is None
                     break
+                assert cursor, "has_next=True without a usable next cursor"
+                payload = json.loads(base64.b64decode(cursor))
+                if payload.get("t") == "composite-json-null-v1":
+                    tagged_nulls += 1
+                    assert payload["v"]["pk"] in json_null_ids
             else:
                 pytest.fail("JSON cursor traversal did not terminate")
 
