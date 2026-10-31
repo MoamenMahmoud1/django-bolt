@@ -2372,3 +2372,24 @@ def test_django_middleware_keeps_a_bytes_like_body(middleware):
 
     assert response.headers.get("x-frame-options") == "DENY"
     assert response.content == b"abc"
+
+
+@pytest.mark.parametrize(("path", "body"), [("/bytearray", b"abc"), ("/number", b"42")])
+def test_django_middleware_keeps_the_body_of_a_response(path, body):
+    """The bridge to Django middleware sends the rendered body, not its Python repr."""
+    api = BoltAPI(django_middleware=["django.middleware.clickjacking.XFrameOptionsMiddleware"])
+
+    @api.get("/bytearray")
+    async def byte_array():
+        return Response(bytearray(b"abc"), media_type="application/octet-stream")
+
+    @api.get("/number")
+    async def number():
+        return Response(42, media_type="text/plain")
+
+    with TestClient(api) as client:
+        response = client.get(path)
+
+    assert response.headers.get("x-frame-options") == "DENY"
+    assert response.status_code == 200
+    assert response.content == body
