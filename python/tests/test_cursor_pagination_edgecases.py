@@ -221,6 +221,7 @@ def test_legacy_json_object_cursor_uses_scalar_filter():
 
 @pytest.mark.django_db(transaction=True)
 def test_union_values_first_page_retains_legacy_support():
+    """UNION supports first-page slicing; Django rejects filter() on later pages."""
     _seed()
     api = BoltAPI()
 
@@ -242,4 +243,6 @@ def test_union_values_first_page_retains_legacy_support():
     assert response.status_code == 200, response.text
     assert response.json()["items"] == [{"author": "A"}]
     assert response.json()["has_next"] is True
+    # The legacy response emits a cursor, but its continuation is not supported:
+    # Django does not allow filter() on a queryset after union().
     assert response.json()["next_cursor"] is not None

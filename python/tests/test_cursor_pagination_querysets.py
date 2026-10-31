@@ -352,12 +352,20 @@ async def test_grouped_aggregate_sort_alias_rejected_without_unique_group_key():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["distinct", "grouped"])
-async def test_jsonfield_grouped_or_distinct_ordering_rejected(kind):
-    queryset = _JSONOrderingProbe.objects.values("payload")
+@pytest.mark.parametrize("source", ["field", "annotation"])
+async def test_jsonfield_grouped_or_distinct_ordering_rejected(kind, source):
+    queryset = _JSONOrderingProbe.objects.all()
+    ordering = "payload"
+    if source == "annotation":
+        queryset = queryset.annotate(json_sort=F("payload"))
+        ordering = "json_sort"
+    queryset = queryset.values(ordering)
     queryset = queryset.distinct() if kind == "distinct" else queryset.annotate(total=Count("id"))
 
     class ByJSON(CursorPagination):
-        ordering = "payload"
+        pass
+
+    ByJSON.ordering = ordering
 
     with pytest.raises(ValueError, match="JSONField ordering"):
         await ByJSON().paginate_queryset(queryset, {"query": {}})

@@ -92,6 +92,13 @@ the projection. Foreign-key ordering uses the stored ID, not the related model o
 returned items. Single-key `DISTINCT` and `GROUP BY` projections are pageable
 when their ordering field uniquely identifies each result; other grouped or
 distinct projections raise `ValueError`. A `DISTINCT` projection with additional non-grouped selected annotations is also rejected to avoid silently dropping rows. NULL ordering values are supported.
+JSONField ordering (including JSON-valued annotations) is rejected for
+`DISTINCT` and `GROUP BY` projections because SQL NULL and JSON null cannot
+be distinguished in projected cursor values.
+
+Combined querysets such as `union()` retain first-page support only.
+Django does not allow `filter()` after `union()`, so an emitted `next_cursor`
+cannot currently retrieve subsequent pages for these querysets.
 
 On large PostgreSQL tables, a suitable B-tree index on the ordering field and
 primary key can help seek efficiently through deep pages.

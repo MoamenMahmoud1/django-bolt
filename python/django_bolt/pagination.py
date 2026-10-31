@@ -30,7 +30,7 @@ from functools import wraps
 from typing import Any, Generic, NamedTuple, TypeVar, get_args, get_origin
 
 import msgspec
-from django.core.exceptions import FieldDoesNotExist, ValidationError
+from django.core.exceptions import FieldDoesNotExist, FieldError, ValidationError
 from django.db import connections
 from django.db.models import F, Q
 from django.db.models.fields.tuple_lookups import (
@@ -712,7 +712,15 @@ class CursorPagination(PaginationBase):
         grouped_or_distinct = projected and bool(queryset.query.distinct or queryset.query.group_by)
         if grouped_or_distinct and not is_pk_ordering:
             # JSON null and SQL NULL are indistinguishable in projected results.
-            if sort_field is not None and sort_field.get_internal_type() == "JSONField":
+            ordering_output_field = sort_field
+            if ordering_output_field is None:
+                annotation = queryset.query.annotations.get(ordering_field)
+                if annotation is not None:
+                    try:
+                        ordering_output_field = annotation.output_field
+                    except FieldError as exc:
+                        raise ValueError("CursorPagination cannot resolve annotation ordering type") from exc
+            if ordering_output_field is not None and ordering_output_field.get_internal_type() == "JSONField":
                 raise ValueError("CursorPagination cannot paginate DISTINCT/GROUP BY over a JSONField ordering")
             if tuple(selected_fields) not in (
                 (ordering_field,),
