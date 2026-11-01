@@ -857,8 +857,8 @@ pub fn handle_test_websocket(
         }
     };
 
-    // Only native Bolt routes use the global Origin check. ASGI mounts
-    // must enforce their own policy, as they do on the production server.
+    // Native Bolt routes always use the global Origin check. ASGI mounts
+    // have already applied their selected policy in the mount branch above.
     let origin = header_map.get("origin");
     if let Some(origin_value) = origin {
         // The production check. A value that no header can hold is denied too.
