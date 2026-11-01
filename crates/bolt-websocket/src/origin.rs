@@ -2,6 +2,7 @@
 
 use actix_web::http::header::HeaderValue;
 use bolt_core::metadata::CorsConfig;
+use bolt_core::state::WebSocketOriginPolicy;
 
 /// Check the Origin header of a WebSocket handshake against the global CORS config.
 /// `runbolt` and the test client both call this function.
@@ -35,6 +36,25 @@ pub fn validate_origin(origin: Option<&HeaderValue>, cors_config: Option<&CorsCo
         origin
     );
     false
+}
+
+/// Validate an explicitly selected ASGI-mount Origin policy.
+///
+/// The default delegates to Bolt's global policy; the dedicated allowlist
+/// requires a header and exact match. Only an explicit delegate choice leaves
+/// validation to the mounted ASGI app.
+pub fn validate_mount_origin(
+    origin: Option<&HeaderValue>,
+    cors_config: Option<&CorsConfig>,
+    policy: &WebSocketOriginPolicy,
+) -> bool {
+    match policy {
+        WebSocketOriginPolicy::Inherit => validate_origin(origin, cors_config),
+        WebSocketOriginPolicy::Delegate => true,
+        WebSocketOriginPolicy::Allowlist(allowed) => origin
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| allowed.contains(value)),
+    }
 }
 
 /// Check if an origin is allowed by the CORS configuration.
