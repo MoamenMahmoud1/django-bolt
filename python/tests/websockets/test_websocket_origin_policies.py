@@ -166,3 +166,29 @@ async def test_global_settings_not_read_when_test_client_opts_out():
         api = make_api()
         with pytest.raises(PermissionError, match="Origin not allowed"):
             await connect(api, "/native", "https://external.example", read_settings=False)
+
+
+@pytest.mark.asyncio
+async def test_custom_can_explicitly_allow_missing_origin_after_validation():
+    observed = []
+
+    async def validator(origin, context):
+        observed.append(origin)
+        return origin is None
+
+    api = make_api(native_options={
+        "origin_policy": "custom",
+        "origin_validator": validator,
+        "allow_missing_origin": True,
+    })
+    assert await connect(api, "/native", None) == "native"
+    assert observed == [None]
+    with pytest.raises(PermissionError, match="Origin not allowed"):
+        await connect(api, "/native", "https://untrusted.example")
+
+
+def test_global_delegate_is_not_an_implicit_security_opt_out():
+    with override_settings(BOLT_WEBSOCKET_ORIGIN_POLICY="delegate"):
+        with pytest.raises(ValueError, match="delegate must be selected explicitly"):
+            from django_bolt.websocket.origin_policy import resolve_origin_options
+            resolve_origin_options(asgi=True)
