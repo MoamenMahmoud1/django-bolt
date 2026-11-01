@@ -31,7 +31,6 @@ def test_mounted_asgi_app_serves_websocket(make_server_project):
     assert reason == "done"
 
 
-
 @pytest.mark.parametrize(
     "cors_settings",
     ["", 'CORS_ALLOWED_ORIGINS = ["https://allowed-by-bolt.example"]'],
@@ -45,12 +44,8 @@ def test_mounted_asgi_app_owns_websocket_origin_policy(make_server_project, cors
 
     with project.start() as server:
         headers = {"Origin": "https://managed-by-asgi.example"}
-        mount_status, _ = attempt_ws_upgrade(
-            server.host, server.port, "/mounted/ws", headers=headers
-        )
-        native_status, native_body = attempt_ws_upgrade(
-            server.host, server.port, "/ws/direct", headers=headers
-        )
+        mount_status, _ = attempt_ws_upgrade(server.host, server.port, "/mounted/ws", headers=headers)
+        native_status, native_body = attempt_ws_upgrade(server.host, server.port, "/ws/direct", headers=headers)
 
     assert " 101 " in mount_status, mount_status
     assert " 403 " in native_status, native_status
