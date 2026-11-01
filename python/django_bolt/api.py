@@ -3727,7 +3727,15 @@ class BoltAPI:
         )
         self._asgi_mounts.append((mount_path, mounted_app))
 
-    def mount_django(self, path: str, app: Any | None = None, *, clear_root_path: bool = False) -> None:
+    def mount_django(
+        self,
+        path: str,
+        app: Any | None = None,
+        *,
+        clear_root_path: bool = False,
+        websocket_origin_policy: str = "inherit",
+        websocket_allowed_origins: list[str] | None = None,
+    ) -> None:
         """Mount Django's ASGI app at a path prefix (convenience wrapper over mount_asgi).
 
         Args:
@@ -3736,6 +3744,8 @@ class BoltAPI:
             clear_root_path: Set ``root_path=""`` before Django sees the scope.
                 Required when URL patterns already include the mount prefix
                 (e.g. ``/admin/...``).
+            websocket_origin_policy: Same secure options as mount_asgi().
+            websocket_allowed_origins: Exact WebSocket origins in allowlist mode.
         """
         asgi_app = app
         if asgi_app is None:
@@ -3759,7 +3769,12 @@ class BoltAPI:
         if isinstance(asgi_app, ASGIHandler):
             django_mount_wrapper._bolt_http_only = True
 
-        self.mount_asgi(path, django_mount_wrapper)
+        self.mount_asgi(
+            path,
+            django_mount_wrapper,
+            websocket_origin_policy=websocket_origin_policy,
+            websocket_allowed_origins=websocket_allowed_origins,
+        )
 
     def mount_mcp(
         self,
