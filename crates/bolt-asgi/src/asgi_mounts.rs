@@ -1,8 +1,6 @@
 use pyo3::prelude::*;
 
-use bolt_core::state::{AsgiMount, WebSocketOriginPolicy};
-use std::collections::HashSet;
-use std::sync::Arc;
+use bolt_core::state::{AsgiMount, parse_websocket_origin_policy};
 
 /// Validate, normalize ordering, and de-duplicate ASGI mount configuration.
 pub fn validate_and_sort_asgi_mounts(
@@ -32,39 +30,18 @@ pub fn validate_and_sort_asgi_mounts(
             None => true,
         };
 
-        // Resolve policy once at registration; there is no Python work per handshake.
-        let policy_name = app
-            .bind(py)
-            .getattr_opt("_bolt_websocket_origin_policy")?
-            .map(|value| value.extract::<String>())
-            .transpose()?
-            .unwrap_or_else(|| "inherit".to_string());
-        let websocket_origin_policy = match policy_name.as_str() {
-            "inherit" => WebSocketOriginPolicy::Inherit,
-            "delegate" => WebSocketOriginPolicy::Delegate,
-            "allowlist" => {
-                let origins = app
-                    .bind(py)
-                    .getattr("_bolt_websocket_allowed_origins")?
-                    .extract::<Vec<String>>()?;
-                if origins.is_empty() {
-                    return Err(pyo3::exceptions::PyValueError::new_err(
-                        "WebSocket Origin allowlist must not be empty",
-                    ));
-                }
-                WebSocketOriginPolicy::Allowlist(origins.into_iter().collect::<HashSet<_>>())
-            }
-            _ => {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "Invalid WebSocket Origin policy: {policy_name}"
-                )));
-            }
+        // A raw ASGI mount keeps the legacy global Origin protection.
+        let policy_config = app.bind(py).getattr_opt("_bolt_websocket_origin_policy")?;
+        let origin_policy = if policy_config.is_some() {
+            parse_websocket_origin_policy(py, Some(app.bind(py)))?
+        } else {
+            parse_websocket_origin_policy(py, None)?
         };
         asgi_mounts.push(AsgiMount {
             prefix,
             app,
             websocket,
-            websocket_origin_policy: Arc::new(websocket_origin_policy),
+            websocket_origin_policy: origin_policy,
         });
     }
 
