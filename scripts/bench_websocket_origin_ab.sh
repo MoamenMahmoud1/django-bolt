@@ -6,7 +6,7 @@ set -euo pipefail
 
 REPO="$(git rev-parse --show-toplevel)"
 BEFORE_REF="${BEFORE_REF:-89badcb4dc9e2d35c215077789cdabf8268b7aac}"
-AFTER_REF="${AFTER_REF:-fix/asgi-websocket-origin-boundary}"
+AFTER_REF="${AFTER_REF:-origin/fix/asgi-websocket-origin-boundary}"
 RESULTS_DIR="${1:-$REPO/websocket-origin-ab-results}"
 mkdir -p "$RESULTS_DIR"
 RESULTS_DIR="$(cd "$RESULTS_DIR" && pwd)"
