@@ -42,6 +42,10 @@ async def echo_app(scope, receive, send):
         pass
 
 
+def custom_origin(origin, context):
+    return origin == "https://allowed.example"
+
+
 def measure(path: str, policy: str, count: int, repeats: int) -> dict:
     api = BoltAPI()
 
@@ -52,6 +56,11 @@ def measure(path: str, policy: str, count: int, repeats: int) -> dict:
     mount_kwargs = {}
     if policy == "delegate":
         mount_kwargs["websocket_origin_policy"] = "delegate"
+    elif policy == "any":
+        mount_kwargs["websocket_origin_policy"] = "any"
+    elif policy == "custom":
+        mount_kwargs["websocket_origin_policy"] = "custom"
+        mount_kwargs["websocket_origin_validator"] = custom_origin
     elif policy == "allowlist":
         mount_kwargs["websocket_origin_policy"] = "allowlist"
         mount_kwargs["websocket_allowed_origins"] = ["https://allowed.example"]
@@ -104,6 +113,10 @@ async def full_handshake_roundtrips(policy: str, count: int) -> dict:
         }
     elif policy == "delegate":
         kwargs = {"websocket_origin_policy": "delegate"}
+    elif policy == "any":
+        kwargs = {"websocket_origin_policy": "any"}
+    elif policy == "custom":
+        kwargs = {"websocket_origin_policy": "custom", "websocket_origin_validator": custom_origin}
     api.mount_asgi("/mounted", echo_app, **kwargs)
     client_args = {
         "headers": {"Origin": "https://allowed.example"},
@@ -147,6 +160,7 @@ def main():
             [
                 measure("/mounted/ws", "allowlist", args.count, args.repeats),
                 measure("/mounted/ws", "delegate", args.count, args.repeats),
+                measure("/mounted/ws", "any", args.count, args.repeats),
             ]
         )
     roundtrips = [asyncio.run(full_handshake_roundtrips("inherit", args.roundtrips))]
@@ -154,6 +168,8 @@ def main():
         roundtrips.extend([
             asyncio.run(full_handshake_roundtrips("allowlist", args.roundtrips)),
             asyncio.run(full_handshake_roundtrips("delegate", args.roundtrips)),
+            asyncio.run(full_handshake_roundtrips("any", args.roundtrips)),
+            asyncio.run(full_handshake_roundtrips("custom", args.roundtrips)),
         ])
     result = {
         "roundtrips": roundtrips,
