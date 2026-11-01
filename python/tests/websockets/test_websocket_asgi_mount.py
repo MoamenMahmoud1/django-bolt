@@ -10,7 +10,7 @@ import pytest
 from django.test import override_settings
 
 from django_bolt import BoltAPI, WebSocket
-from django_bolt.testing import WebSocketTestClient
+from django_bolt.testing import HandshakeRejected, WebSocketTestClient
 
 
 async def echo_app(scope, receive, send):
@@ -121,6 +121,38 @@ async def test_mounted_asgi_app_owns_origin_policy(api):
     with pytest.raises(PermissionError, match="Origin not allowed"):
         async with WebSocketTestClient(api, "/ws/direct", **options):
             pass
+
+
+
+@pytest.mark.asyncio
+async def test_mounted_asgi_app_can_reject_origins_it_does_not_trust():
+    """The mounted app, not Bolt, decides which browser origins are trusted."""
+    async def protected_app(scope, receive, send):
+        await receive()
+        origin = dict(scope["headers"]).get(b"origin")
+        if origin != b"https://trusted.example":
+            await send({"type": "websocket.close"})
+            return
+        await send({"type": "websocket.accept"})
+        await send({"type": "websocket.send", "text": "trusted"})
+
+    api = BoltAPI()
+    api.mount_asgi("/protected", protected_app)
+    options = {
+        "cors_allowed_origins": ["https://bolt-policy.example"],
+        "read_django_settings": False,
+    }
+    async with WebSocketTestClient(
+        api, "/protected/ws", headers={"Origin": "https://trusted.example"}, **options
+    ) as ws:
+        assert await ws.receive_text() == "trusted"
+
+    with pytest.raises(HandshakeRejected) as rejected:
+        async with WebSocketTestClient(
+            api, "/protected/ws", headers={"Origin": "https://untrusted.example"}, **options
+        ):
+            pass
+    assert rejected.value.status_code == 403
 
 
 @pytest.mark.asyncio
