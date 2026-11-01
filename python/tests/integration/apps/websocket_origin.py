@@ -20,3 +20,20 @@ async def health():
 async def echo(websocket: WebSocket):
     await websocket.accept()
     await websocket.send_text("accepted")
+
+
+def tenant_origin(origin, context):
+    """Small sync custom validator, called once on the opening handshake."""
+    return origin == "https://tenant.example" and context["path"] == "/ws/tenant"
+
+
+@api.websocket("/ws/tenant", origin_policy="custom", origin_validator=tenant_origin)
+async def tenant(websocket: WebSocket):
+    await websocket.accept()
+    await websocket.send_text("tenant")
+
+
+@api.websocket("/ws/public", origin_policy="any", allow_missing_origin=True)
+async def public(websocket: WebSocket):
+    await websocket.accept()
+    await websocket.send_text("public")
