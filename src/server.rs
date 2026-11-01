@@ -1097,6 +1097,7 @@ pub async fn websocket_upgrade_handler(
                 handler_id: route.handler_id,
                 path_params,
                 injector,
+                origin_policy: route.origin_policy.clone(),
             },
             state.get_ref().clone(),
         )
