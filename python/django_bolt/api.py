@@ -285,8 +285,9 @@ class _ConfiguredASGIMount:
         self._bolt_websocket_allowed_origins = origins or []
         self._bolt_http_only = getattr(app, "_bolt_http_only", False)
 
-    async def __call__(self, scope, receive, send):
-        await self._app(scope, receive, send)
+    def __call__(self, scope, receive, send):
+        # Return the original awaitable without creating an extra coroutine.
+        return self._app(scope, receive, send)
 
 
 def _validate_asgi_mount_conflicts(
