@@ -71,6 +71,15 @@ def test_memcached_compare_and_bump_under_concurrent_clients(initial_version):
             raw_key = probe.cache.make_and_validate_key(version_key)
             _, cas_token = probe.cache._cache.gets(raw_key)
             assert cas_token is not None
+
+            # GETS proves CAS support, not that the key has no expiration.
+            # Memcached's meta-get `t` flag reports -1 for an unlimited TTL.
+            with socket.create_connection(("127.0.0.1", 11211), timeout=2) as connection:
+                connection.sendall(b"mg " + raw_key.encode("ascii") + b" t\r\n")
+                with connection.makefile("rb") as reader:
+                    metadata = reader.readline().strip().split()
+            assert metadata and metadata[0] == b"HD", metadata
+            assert b"t-1" in metadata[1:], metadata
         finally:
             try:
                 probe.cache.delete(version_key)
