@@ -50,7 +50,7 @@ pub fn validate_mount_origin(
 ) -> bool {
     match policy {
         WebSocketOriginPolicy::Inherit { allow_missing } => {
-            if origin.is_none() && !allow_missing { return false; }
+            if origin.is_none() && !*allow_missing { return false; }
             validate_origin(origin, cors_config)
         }
         WebSocketOriginPolicy::Delegate => true,
