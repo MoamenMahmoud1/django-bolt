@@ -304,6 +304,20 @@ class WebSocketTestClient:
             scope,
         ) = self._find_handler_via_rust()
 
+        # The Rust TestClient returns a validator only for the opt-in custom
+        # policy. Run it before the app can send websocket.accept.
+        custom_validator = scope.pop("_bolt_origin_validator", None)
+        if custom_validator is not None:
+            headers = {name.lower(): value for name, value in self.headers.items()}
+            origin = headers.get("origin")
+            context = {"path": self.path, "query_string": self.query_string, "headers": headers}
+            try:
+                permitted = await asyncio.wait_for(custom_validator(origin, context), timeout=5.0)
+                if permitted is not True:
+                    raise PermissionError("Origin not allowed")
+            except Exception as exc:
+                raise PermissionError("Origin not allowed") from exc
+
         self._requested_subprotocols = scope["subprotocols"]
 
         if is_asgi_mount:
