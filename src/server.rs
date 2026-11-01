@@ -608,12 +608,12 @@ pub fn register_routes(
     reason = "PyO3 wire format: Python passes each WebSocket route as one tuple"
 )]
 pub fn register_websocket_routes(
-    _py: Python<'_>,
-    routes: Vec<(String, usize, Py<PyAny>, Option<Py<PyAny>>)>,
+    py: Python<'_>,
+    routes: Vec<(String, usize, Py<PyAny>, Option<Py<PyAny>>, Py<PyAny>)>,
 ) -> PyResult<()> {
     let mut router = WebSocketRouter::new();
-    for (path, handler_id, handler, injector) in routes {
-        router.register(&path, handler_id, handler, injector)?;
+    for (path, handler_id, handler, injector, origin_config) in routes {
+        router.register(&path, handler_id, handler, injector, Some(origin_config.bind(py)), py)?;
     }
     GLOBAL_WEBSOCKET_ROUTER.set(Arc::new(router)).map_err(|_| {
         pyo3::exceptions::PyRuntimeError::new_err("WebSocket router already initialized")
