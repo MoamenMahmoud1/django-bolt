@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -13,7 +14,13 @@ from django_bolt.responses import JSON
 
 from .backends import JWTAuthentication
 from .guards import IsAuthenticated
-from .tokens import TokenRotationError, create_token_pair, rotate_refresh_token, set_token_cookies
+from .tokens import (
+    DEFAULT_REFRESH_TTL,
+    TokenRotationError,
+    create_token_pair,
+    rotate_refresh_token,
+    set_token_cookies,
+)
 
 
 class LoginCredentials(msgspec.Struct):
@@ -66,26 +73,39 @@ class JWTAuthViews:
         return response
 
     async def _require_active_refresh(self, request: Any) -> dict[str, Any]:
-        """Check stateful refresh validity before a logout changes session state.
+        """Reject inactive refresh tokens before changing logout state.
 
-        The shared Rust backend checks signature, expiry and token type, but
-        intentionally does not pre-check revocation: /refresh must see a reused
-        token to revoke its whole rotation family.
+        Redis stores can read JTI, family and version in one primary MGET.
+        Other stores retain the existing individual checks.
         """
         claims = request["context"]["auth_claims"]
         jti = claims.get("jti")
-        if not isinstance(jti, str) or not jti or await self.store.is_revoked(jti):
+        if not isinstance(jti, str) or not jti:
             raise HTTPException(status_code=401, detail="Invalid token")
 
         fam = claims.get("fam")
-        if fam is not None and (not isinstance(fam, str) or not fam or await self.store.is_family_revoked(fam)):
+        if fam is not None and (not isinstance(fam, str) or not fam):
             raise HTTPException(status_code=401, detail="Invalid token")
 
         try:
             version = int(claims.get("ver", 0))
         except (TypeError, ValueError):
             raise HTTPException(status_code=401, detail="Invalid token") from None
+
         user_id = request["context"]["user_id"]
+        batch_reader = getattr(self.store, "get_refresh_state", None)
+        if batch_reader is not None:
+            state = await batch_reader(jti, fam, user_id)
+            if state is not None:
+                jti_revoked, family_revoked, current_version = state
+                if jti_revoked or family_revoked or version != current_version:
+                    raise HTTPException(status_code=401, detail="Invalid token")
+                return claims
+
+        if await self.store.is_revoked(jti):
+            raise HTTPException(status_code=401, detail="Invalid token")
+        if fam is not None and await self.store.is_family_revoked(fam):
+            raise HTTPException(status_code=401, detail="Invalid token")
         if version != await self.store.get_user_version(user_id):
             raise HTTPException(status_code=401, detail="Invalid token")
         return claims
@@ -163,7 +183,16 @@ class JWTAuthViews:
             fam = claims.get("fam")
             if not isinstance(fam, str) or not fam:
                 raise HTTPException(status_code=401, detail="Invalid token")
-            await self.store.revoke_family(fam, exp=claims.get("exp"))
+            # The refresh validator accepts a token for `leeway` seconds
+            # beyond `exp`. A refresh already in flight can also issue a
+            # descendant that expires later than the logging-out token.
+            # Keep the family block for the full possible successor lifetime.
+            try:
+                token_exp = int(claims["exp"]) if claims.get("exp") is not None else 0
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=401, detail="Invalid token") from None
+            expires_at = max(token_exp, int(time.time()) + DEFAULT_REFRESH_TTL) + refresh_auth.leeway
+            await self.store.revoke_family(fam, exp=expires_at)
             return self._clear_cookies(JSON({"ok": True}))
 
         @api.post(

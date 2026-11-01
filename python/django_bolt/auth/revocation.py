@@ -36,8 +36,10 @@ def _ttl_for(exp: int | None, default: int = _DEFAULT_TTL_SECONDS) -> int:
     """
     Seconds a revocation entry should live.
 
-    Prefers the token's own ``exp`` (so the entry expires exactly when the
-    token would have anyway). A past ``exp`` clamps to 0 — we never hand a
+    Uses the caller-supplied absolute retention deadline. For JWTs,
+    include the verifier's expiry leeway (token ``exp`` + leeway) to avoid
+    removing a revocation marker while the token is still accepted. A past
+    deadline clamps to 0 — we never hand a
     negative duration to ``timedelta``, which would silently subtract from
     now. When ``exp`` is ``None``, ``default`` is used — typically the
     store's ``default_ttl`` instance attribute.
@@ -72,19 +74,17 @@ class RevocationStore(ABC):
         """
         Revoke a token.
 
-        The revocation entry must outlive the token, otherwise an attacker
-        could replay a still-valid JWT after the entry is cleaned up. Pass
-        the token's ``exp`` claim so the entry expires exactly when the
-        token would have anyway:
+        The revocation marker must remain until no configured verifier
+        can accept the JWT, including any expiry leeway. For example, with
+        a ``JWTAuthentication`` instance named ``auth``:
 
-            await store.revoke(claims["jti"], exp=claims.get("exp"))
+            await store.revoke(claims["jti"], exp=claims["exp"] + auth.leeway)
 
         Args:
             jti: JWT ID to revoke.
-            exp: The token's ``exp`` claim (epoch seconds). Strongly
-                recommended. If omitted, falls back to a 30-day retention —
-                safe for most refresh-token windows but wasteful for short
-                access tokens.
+            exp: Absolute retention deadline (epoch seconds), including any
+                JWT verifier leeway. If omitted, uses the store's fallback
+                TTL (7 days by default); ensure it covers the token lifetime.
         """
         pass
 
@@ -181,7 +181,7 @@ class InMemoryRevocation(RevocationStore):
         @api.post("/logout")
         async def logout(request):
             claims = request["context"]["auth_claims"]
-            await revocation.revoke(claims["jti"], exp=claims.get("exp"))
+            await revocation.revoke(claims["jti"], exp=claims["exp"] + auth.leeway)
             return {"message": "Logged out"}
         ```
     """
@@ -283,7 +283,7 @@ class DjangoCacheRevocation(RevocationStore):
         @api.post("/logout")
         async def logout(request):
             claims = request["context"]["auth_claims"]
-            await revocation.revoke(claims["jti"], exp=claims.get("exp"))
+            await revocation.revoke(claims["jti"], exp=claims["exp"] + auth.leeway)
             return {"message": "Logged out"}
         ```
     """
@@ -332,6 +332,39 @@ class DjangoCacheRevocation(RevocationStore):
             return None if raw is None else backend._serializer.loads(raw)
         return cache.get(key)
 
+    async def get_refresh_state(self, jti: str, fam: str | None, user_id: str) -> tuple[bool, bool, int] | None:
+        """Read refresh revocation state atomically from Redis primary.
+
+        ``None`` asks JWTAuthViews to keep its existing per-field fallback
+        for Memcached, LocMem and other Django cache backends. This is an
+        optional store capability, not a new RevocationStore requirement.
+        """
+        cache = self.cache
+        if not isinstance(cache, RedisCache):
+            return None
+
+        # A custom store may override individual revocation/version checks.
+        # Do not bypass those policies with the optimized Redis read path.
+        if any(
+            getattr(getattr(self, name), "__func__", None) is not getattr(DjangoCacheRevocation, name)
+            for name in ("is_revoked", "is_family_revoked", "get_user_version")
+        ):
+            return None
+
+        keys = [f"{self.key_prefix}{jti}"]
+        if fam is not None:
+            keys.append(f"{self.key_prefix}fam:{fam}")
+        keys.append(f"{self.key_prefix}ver:{user_id}")
+        cache_keys = [cache.make_and_validate_key(key) for key in keys]
+        backend = cache._cache
+        client = backend.get_client(cache_keys[0], write=True)
+        raw_values = client.mget(cache_keys)
+        if len(raw_values) != len(cache_keys):
+            raise RuntimeError("Incomplete Redis JWT refresh state")
+        values = [None if raw is None else backend._serializer.loads(raw) for raw in raw_values]
+        family_revoked = fam is not None and values[1] is not None
+        return values[0] is not None, family_revoked, int(values[-1] or 0)
+
     async def is_revoked(self, jti: str) -> bool:
         key = f"{self.key_prefix}{jti}"
         return self._get_revocation_state(key) is not None
@@ -340,11 +373,10 @@ class DjangoCacheRevocation(RevocationStore):
         """
         Revoke a token by storing its JTI in the cache.
 
-        Pass ``exp`` (the token's ``exp`` claim) so the cache entry expires
-        exactly when the token would have — no security gap, no wasted
-        storage.
+        Pass an absolute retention deadline that includes the JWT
+        verifier's leeway so an accepted token cannot outlive its marker.
 
-            await store.revoke(claims["jti"], exp=claims.get("exp"))
+            await store.revoke(claims["jti"], exp=claims["exp"] + auth.leeway)
 
         If ``exp`` is omitted, the entry lives for ``self.default_ttl``
         seconds (set on the constructor).
@@ -488,7 +520,7 @@ class DjangoORMRevocation(RevocationStore):
     @api.post("/logout")
     async def logout(request):
         claims = request["context"]["auth_claims"]
-        await revocation.revoke(claims["jti"], exp=claims.get("exp"))
+        await revocation.revoke(claims["jti"], exp=claims["exp"] + auth.leeway)
         return {"message": "Logged out"}
     ```
 
@@ -537,11 +569,11 @@ class DjangoORMRevocation(RevocationStore):
         """
         Revoke a token by upserting a row keyed on its JTI.
 
-        Pass ``exp`` (the token's ``exp`` claim) so ``expires_at`` aligns
-        with the token's own expiry — your cleanup task can drop the row
-        exactly when the token would have stopped being honored anyway.
+        Pass an absolute retention deadline that includes the JWT
+        verifier's leeway; cleanup must not remove a row while the JWT can
+        still be accepted.
 
-            await store.revoke(claims["jti"], exp=claims.get("exp"))
+            await store.revoke(claims["jti"], exp=claims["exp"] + auth.leeway)
 
         If ``exp`` is omitted, ``expires_at`` is set to ``now +
         self.default_ttl`` (set on the constructor).

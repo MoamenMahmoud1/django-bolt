@@ -392,6 +392,29 @@ This adds `POST /auth/login`, `/auth/refresh`, `/auth/logout`, and
 username/password pair; lower-level helpers remain available for fully custom
 flows.
 
+!!! warning "JWTAuthViews requires a versioned, atomic revocation store"
+
+    For its cookie lifecycle, `JWTAuthViews` uses atomic refresh-token
+    consumption, JTI and family revocation, a per-user token version, and an
+    atomic compare-and-bump for `/auth/logout-all`. Use
+    `DjangoCacheRevocation` backed by Redis or Memcached in multi-worker
+    deployments; LocMem is suitable only for a single-process development
+    environment. `DjangoORMRevocation` supports individual token revocation
+    but does **not** implement the required versioning/CAS methods for these
+    ready-made views.
+
+    A custom store that cannot perform atomic compare-and-bump makes
+    `/auth/logout-all` return **503** without changing the user version.
+    This is intentional: a non-atomic read-then-increment can let a stale
+    concurrent logout invalidate a new login. Do not fall back to
+    `bump_user_version()` for this route.
+
+    Revoke-family records must survive JWT expiry leeway and the lifetime
+    of any refresh token issued by a concurrent in-flight rotation. Refresh
+    cookies are invalidated on logout; already-issued stateless access
+    tokens remain valid until their own expiry unless an application adds
+    access-token revocation checks.
+
 ### Issuing a pair
 
 Call `create_token_pair()` once the user has proved who they are — by
@@ -513,13 +536,48 @@ async def logout_all(request):
 This is a single O(1) write; you do not need to find and revoke each
 outstanding token.
 
-!!! note "Access tokens run out their lifetime"
+!!! note "Access tokens are stateless by default"
 
-    Access tokens are deliberately not checked against the store on each
-    request — that is what makes them cheap to validate. A user who is
-    "logged out everywhere" can therefore keep using an existing access
-    token until it expires. Keep access lifetimes short; with the
-    default 15 minutes, that is the longest such a token can survive.
+    The built-in `create_revocation_handler()` checks individual JTIs, not
+    the `ver` claim. A global logout invalidates refresh-token rotation,
+    but an existing access token can still authenticate until its `exp`
+    plus the verifier's configured clock-skew `leeway` (60 seconds by
+    default). A default 15-minute access token can therefore be accepted
+    for approximately 16 minutes. This deliberately avoids a per-request
+    user-version lookup and its cost for the default access-token path.
+
+    Applications requiring immediate rejection after `/auth/logout-all`
+    can opt in on selected routes by providing a two-argument
+    `revoked_token_handler(jti, claims)`:
+
+    ```python
+    from django_bolt.auth import JWTAuthentication
+
+    async def strict_revocation(jti, claims):
+        if await store.is_revoked(jti):
+            return True
+        user_id = claims.get("sub")
+        version = claims.get("ver")
+        if not isinstance(user_id, str) or not user_id or type(version) is not int:
+            return True
+        return version != await store.get_user_version(user_id)
+
+    strict_auth = JWTAuthentication(
+        revocation_store=store,
+        revoked_token_handler=strict_revocation,
+    )
+    ```
+
+    Use this backend on the routes where immediate access-token
+    invalidation is required, with an enforcing guard such as
+    `IsAuthenticated`. The extra store read happens on each accepted
+    access-token request and must be included in capacity planning.
+    The store must preserve user-version keys across refresh-token
+    lifetimes and restarts; do not evict these security keys.
+    Checking `ver` invalidates earlier access tokens after global logout,
+    but does not by itself identify a single logged-out session. The
+    access-token schema currently has no `fam` claim; per-session instant
+    invalidation requires a separate explicit application policy.
 
 ### Limiting total session length
 
@@ -844,13 +902,15 @@ to call `is_revoked()` manually.
     sure your token issuer adds one — `create_jwt_for_user(...,
     extra_claims={"jti": uuid.uuid4().hex})` is the simplest way.
 
-!!! tip "Always pass the token's `exp`"
+!!! tip "Keep revocation entries through JWT validation leeway"
 
-    `revoke()` accepts an `exp` keyword argument. Pass the token's own
-    `exp` claim so the revocation entry expires exactly when the token
-    would have anyway — no security gap, no wasted storage. Without
-    `exp`, the entry falls back to the store's `default_ttl` (7 days
-    by default).
+    `revoke(..., exp=...)` controls when the revocation marker expires.
+    A verifier with nonzero `leeway` accepts JWTs briefly past the token's
+    `exp`: storing the raw expiry would remove the marker early and allow
+    replay during the grace period. With a `JWTAuthentication` backend,
+    pass `claims["exp"] + jwt_auth.leeway`, or a later bound consistent with
+    every verifier that accepts the same token. The fallback `default_ttl`
+    may be too short for longer-lived refresh tokens.
 
 ### In-memory revocation (development)
 
@@ -863,7 +923,7 @@ jwt_auth = JWTAuthentication(revocation_store=store)
 @api.post("/logout", auth=[jwt_auth], guards=[IsAuthenticated()])
 async def logout(request):
     claims = request["context"]["auth_claims"]
-    await store.revoke(claims["jti"], exp=claims.get("exp"))
+    await store.revoke(claims["jti"], exp=claims["exp"] + jwt_auth.leeway)
     return {"status": "logged out"}
 ```
 
@@ -977,8 +1037,9 @@ an internal module of allauth, so check them when you upgrade allauth.
 
 `revoke()` resolves the entry's lifetime in this order:
 
-1. **`exp` keyword arg** — derived as `max(0, exp - now)`. Use this whenever
-   you have the token's full claims (i.e. always, in a logout handler).
+1. **`exp` keyword arg** — the absolute revocation-marker deadline,
+   converted into TTL as `max(0, exp - now)`. For JWTs pass the token's
+   `exp` **plus the verifier's expiry `leeway`**, not the raw token expiry.
 2. **`store.default_ttl`** — set on the constructor. Used when `revoke()`
    is called without `exp` (e.g. an admin action that revokes by JTI).
 3. **`_DEFAULT_TTL_SECONDS`** — module-level fallback (7 days) if neither
