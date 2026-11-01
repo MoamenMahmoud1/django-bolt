@@ -17,7 +17,6 @@ pub use bolt_loop::TASK_LOCALS;
 
 /// Precompiled WebSocket Origin policy. Custom callbacks are opt-in and
 /// invoked only on the opening handshake, never on messages.
-#[derive(Debug)]
 pub enum WebSocketOriginPolicy {
     Inherit { allow_missing: bool },
     Delegate,
