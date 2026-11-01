@@ -754,9 +754,12 @@ pub async fn handle_websocket_upgrade(
         }
     }
 
-    // Validate origin header (CORS-like protection for WebSocket)
-    // Uses same CORS config as HTTP requests
-    if !origin::validate_origin(req.headers().get(ORIGIN), state.global_cors_config.as_ref()) {
+    // Native Bolt routes use the global WebSocket Origin policy.
+    // Mounted ASGI apps own their Origin checks (for example, Channels'
+    // OriginValidator), just as they own their other middleware.
+    if route_handler_id.is_some()
+        && !origin::validate_origin(req.headers().get(ORIGIN), state.global_cors_config.as_ref())
+    {
         return Ok(HttpResponse::Forbidden()
             .content_type("application/json")
             .body(r#"{"detail":"Origin not allowed"}"#));
