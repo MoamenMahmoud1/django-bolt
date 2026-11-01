@@ -789,25 +789,6 @@ pub fn handle_test_websocket(
         insert_header_line(&mut header_map, &name.to_lowercase(), value);
     }
 
-    // Origin validation for WebSocket
-    let origin = header_map.get("origin");
-    if let Some(origin_value) = origin {
-        // The production check. A value that no header can hold is denied too.
-        let origin_allowed = HeaderValue::from_str(origin_value).is_ok_and(|origin_header| {
-            bolt_websocket::origin::validate_origin(
-                Some(&origin_header),
-                app.config.global_cors_config.as_ref(),
-            )
-        });
-
-        if !origin_allowed {
-            return Err(pyo3::exceptions::PyPermissionError::new_err(format!(
-                "Origin not allowed: {}",
-                origin_value
-            )));
-        }
-    }
-
     // Normalize path
     let normalized_path = if path.len() > 1 && path.ends_with('/') {
         &path[..path.len() - 1]
@@ -854,6 +835,26 @@ pub fn handle_test_websocket(
             };
         }
     };
+
+    // Only native Bolt routes use the global Origin check. ASGI mounts
+    // must enforce their own policy, as they do on the production server.
+    let origin = header_map.get("origin");
+    if let Some(origin_value) = origin {
+        // The production check. A value that no header can hold is denied too.
+        let origin_allowed = HeaderValue::from_str(origin_value).is_ok_and(|origin_header| {
+            bolt_websocket::origin::validate_origin(
+                Some(&origin_header),
+                app.config.global_cors_config.as_ref(),
+            )
+        });
+
+        if !origin_allowed {
+            return Err(pyo3::exceptions::PyPermissionError::new_err(format!(
+                "Origin not allowed: {}",
+                origin_value
+            )));
+        }
+    }
 
     let handler_id = route.handler_id;
     let handler = route.handler.clone_ref(py);
