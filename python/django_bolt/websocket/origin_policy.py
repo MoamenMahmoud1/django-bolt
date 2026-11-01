@@ -59,7 +59,12 @@ def _settings_value(name: str, fallback: Any, enabled: bool) -> Any:
     return getattr(settings, name, fallback)
 
 
-def resolve_origin_options(options: OriginOptions | None = None, *, read_settings: bool = True, asgi: bool = False) -> ResolvedOrigin:
+def resolve_origin_options(
+    options: OriginOptions | None = None,
+    *,
+    read_settings: bool = True,
+    asgi: bool = False,
+) -> ResolvedOrigin:
     """Explicit endpoint values > Django settings > backward-compatible defaults."""
     local = options or OriginOptions()
     global_policy = _settings_value("BOLT_WEBSOCKET_ORIGIN_POLICY", "inherit", read_settings)
