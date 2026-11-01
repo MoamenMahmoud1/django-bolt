@@ -15,15 +15,54 @@ use crate::router::Router;
 use crate::streaming::StreamConfig;
 pub use bolt_loop::TASK_LOCALS;
 
-/// Per-mount WebSocket Origin policy, resolved once at registration.
+/// Precompiled WebSocket Origin policy. Custom callbacks are opt-in and
+/// invoked only on the opening handshake, never on messages.
 #[derive(Debug)]
 pub enum WebSocketOriginPolicy {
-    /// Preserve Bolt's global Origin policy (the backward-compatible default).
-    Inherit,
-    /// The mounted ASGI app takes responsibility for validating Origin.
+    Inherit { allow_missing: bool },
     Delegate,
-    /// Exact permitted browser origins. A missing Origin is rejected.
-    Allowlist(HashSet<String>),
+    Allowlist { origins: HashSet<String>, allow_missing: bool },
+    Any { allow_missing: bool },
+    Custom { validator: Py<PyAny>, allow_missing: bool },
+}
+
+pub fn parse_websocket_origin_policy(
+    py: Python<'_>,
+    configured: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Arc<WebSocketOriginPolicy>> {
+    let Some(obj) = configured else {
+        return Ok(Arc::new(WebSocketOriginPolicy::Inherit { allow_missing: true }));
+    };
+    let policy = obj.getattr("_bolt_websocket_origin_policy")?.extract::<String>()?;
+    let missing = obj.getattr("_bolt_websocket_allow_missing_origin")?.extract::<bool>()?;
+    let result = match policy.as_str() {
+        "inherit" => WebSocketOriginPolicy::Inherit { allow_missing: missing },
+        "delegate" => WebSocketOriginPolicy::Delegate,
+        "any" => WebSocketOriginPolicy::Any { allow_missing: missing },
+        "allowlist" => {
+            let origins = obj.getattr("_bolt_websocket_allowed_origins")?.extract::<Vec<String>>()?;
+            if origins.is_empty() {
+                return Err(pyo3::exceptions::PyValueError::new_err("WebSocket Origin allowlist is empty"));
+            }
+            WebSocketOriginPolicy::Allowlist {
+                origins: origins.into_iter().collect(),
+                allow_missing: missing,
+            }
+        }
+        "custom" => {
+            let validator = obj.getattr("_bolt_websocket_origin_validator")?;
+            if !validator.is_callable() {
+                return Err(pyo3::exceptions::PyValueError::new_err("WebSocket custom origin validator must be callable"));
+            }
+            WebSocketOriginPolicy::Custom {
+                validator: validator.unbind(),
+                allow_missing: missing,
+            }
+        }
+        _ => return Err(pyo3::exceptions::PyValueError::new_err(format!("Invalid WebSocket Origin policy: {policy}"))),
+    };
+    let _ = py;
+    Ok(Arc::new(result))
 }
 
 /// ASGI sub-application mount configuration.
