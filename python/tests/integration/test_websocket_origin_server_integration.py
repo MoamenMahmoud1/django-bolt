@@ -39,7 +39,7 @@ def test_configured_origins_pass_and_other_origins_get_403(make_server_project):
 
     assert " 101 " in exact[0]
     assert " 101 " in regex[0]
-    # A browser sends no Origin header for a same-origin connection.
+    # Non-browser clients may omit Origin; this does not establish same-origin.
     assert " 101 " in no_origin[0]
     for status_line, body in (other, near_miss):
         assert " 403 " in status_line
