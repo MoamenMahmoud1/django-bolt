@@ -803,6 +803,27 @@ pub fn handle_test_websocket(
         None => {
             return match find_websocket_mount_in_slice(&app.asgi_mounts, normalized_path) {
                 Some(mount) => {
+                    let origin_value = header_map.get("origin");
+                    let allowed = match origin_value {
+                        Some(value) => HeaderValue::from_str(value).is_ok_and(|header| {
+                            bolt_websocket::origin::validate_mount_origin(
+                                Some(&header),
+                                app.config.global_cors_config.as_ref(),
+                                &mount.websocket_origin_policy,
+                            )
+                        }),
+                        None => bolt_websocket::origin::validate_mount_origin(
+                            None,
+                            app.config.global_cors_config.as_ref(),
+                            &mount.websocket_origin_policy,
+                        ),
+                    };
+                    if !allowed {
+                        return Err(pyo3::exceptions::PyPermissionError::new_err(format!(
+                            "Origin not allowed: {}",
+                            origin_value.map(String::as_str).unwrap_or("<missing>")
+                        )));
+                    }
                     // The scheme follows BOLT_TRUSTED_PROXIES, as on the server.
                     let secure = bolt_core::middleware::client_ip::resolve_scheme_with(
                         || header_map.get("x-forwarded-proto").map(String::as_str),
