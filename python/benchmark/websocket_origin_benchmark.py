@@ -26,7 +26,7 @@ from django.conf import settings
 if not settings.configured:
     settings.configure(
         SECRET_KEY="websocket-origin-benchmark-only",
-        INSTALLED_APPS=["django.contrib.contenttypes", "django_bolt"],
+        INSTALLED_APPS=["django.contrib.auth", "django.contrib.contenttypes", "django_bolt"],
         DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}},
     )
 django.setup()
