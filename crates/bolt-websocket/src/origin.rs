@@ -7,7 +7,7 @@ use bolt_core::metadata::CorsConfig;
 /// `runbolt` and the test client both call this function.
 ///
 /// Security behavior:
-/// - No Origin header: allow. A browser sends no Origin header for a same-origin connection.
+/// - No Origin header: allow for non-browser clients; absence does not prove same-origin.
 /// - An Origin value that is not visible ASCII: deny.
 /// - No CORS config: deny all cross-origin requests (fail-secure).
 /// - Else: allow only the origins that the CORS config allows.
