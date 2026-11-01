@@ -5,6 +5,7 @@ Provides flexible revocation strategies that users can choose based on their nee
 Revocation is OPTIONAL - only checked if user provides a handler.
 """
 
+import pickle
 import time
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime, timedelta
@@ -12,9 +13,23 @@ from datetime import UTC, datetime, timedelta
 from django.apps import apps
 from django.core.cache import caches
 from django.core.cache.backends.base import BaseCache
+from django.core.cache.backends.locmem import LocMemCache
+from django.core.cache.backends.memcached import PyMemcacheCache
+from django.core.cache.backends.redis import RedisCache
 from django.db import IntegrityError
 
 _DEFAULT_TTL_SECONDS = 86400 * 7  # 7 days — fallback when caller doesn't pass `exp`
+
+# Django's RedisCache serializes integers as plain decimal strings. The version
+# key never expires and CAS + INCR must happen in one server-side operation.
+_REDIS_COMPARE_AND_BUMP = """
+local current = redis.call('GET', KEYS[1])
+if (not current and ARGV[1] == '0') or current == ARGV[1] then
+    redis.call('INCR', KEYS[1])
+    return 1
+end
+return 0
+"""
 
 
 def _ttl_for(exp: int | None, default: int = _DEFAULT_TTL_SECONDS) -> int:
@@ -116,6 +131,14 @@ class RevocationStore(ABC):
         """
         raise NotImplementedError("This revocation store does not support token versioning")
 
+    async def bump_user_version_if_current(self, user_id: str, expected_version: int) -> bool:
+        """Atomically increment only if the user version matches a token.
+
+        Required for replay-safe global logout: get-then-increment is racy.
+        Unsupported stores must fail closed, never fall back to a plain bump.
+        """
+        raise NotImplementedError("This revocation store does not support atomic version comparison")
+
     async def revoke_family(self, fam: str, *, exp: int | None = None) -> None:
         """Revoke an entire refresh-token rotation family (reuse detection).
 
@@ -190,6 +213,15 @@ class InMemoryRevocation(RevocationStore):
         new_version = self._user_versions.get(str(user_id), 0) + 1
         self._user_versions[str(user_id)] = new_version
         return new_version
+
+    async def bump_user_version_if_current(self, user_id: str, expected_version: int) -> bool:
+        # No await in this critical section. InMemoryRevocation is documented
+        # for a single process/event loop, not distributed production workers.
+        key = str(user_id)
+        if self._user_versions.get(key, 0) != expected_version:
+            return False
+        self._user_versions[key] = expected_version + 1
+        return True
 
     async def revoke_family(self, fam: str, *, exp: int | None = None) -> None:
         self._revoked_families.add(fam)
@@ -285,10 +317,24 @@ class DjangoCacheRevocation(RevocationStore):
             self._cache = caches[self.cache_alias]
         return self._cache
 
+    def _get_revocation_state(self, key: str):
+        """Read security-sensitive Redis state from the write primary.
+
+        Django RedisCache.get() routes reads to replicas when configured,
+        which may lag revocations and allow a revoked refresh token to be
+        reused. Preserve the backend's configured serializer and cache key.
+        """
+        cache = self.cache
+        if isinstance(cache, RedisCache):
+            cache_key = cache.make_and_validate_key(key)
+            backend = cache._cache
+            raw = backend.get_client(cache_key, write=True).get(cache_key)
+            return None if raw is None else backend._serializer.loads(raw)
+        return cache.get(key)
+
     async def is_revoked(self, jti: str) -> bool:
         key = f"{self.key_prefix}{jti}"
-        # Django cache get is sync, but fast
-        return self.cache.get(key) is not None
+        return self._get_revocation_state(key) is not None
 
     async def revoke(self, jti: str, *, exp: int | None = None) -> None:
         """
@@ -327,7 +373,7 @@ class DjangoCacheRevocation(RevocationStore):
         return bool(self.cache.add(key, "1", timeout=_ttl_for(exp, self.default_ttl)))
 
     async def get_user_version(self, user_id: str) -> int:
-        return int(self.cache.get(f"{self.key_prefix}ver:{user_id}") or 0)
+        return int(self._get_revocation_state(f"{self.key_prefix}ver:{user_id}") or 0)
 
     async def bump_user_version(self, user_id: str) -> int:
         # User-version keys never expire — they are the source of truth for
@@ -343,12 +389,57 @@ class DjangoCacheRevocation(RevocationStore):
                 return 1
             return self.cache.incr(key)
 
+    async def bump_user_version_if_current(self, user_id: str, expected_version: int) -> bool:
+        """Atomically bump the user version on supported Django cache backends.
+
+        Redis uses Lua; Memcached uses gets/cas; LocMem uses its process-local
+        lock. The generic cache API cannot express CAS. Unsupported backends
+        fail closed instead of a racy get()/incr() fallback.
+        """
+        cache = self.cache
+        version_key = f"{self.key_prefix}ver:{user_id}"
+
+        if isinstance(cache, LocMemCache):
+            # Use the same lock as Django's cache get/set/incr operations.
+            # The development-only LocMem backend is not shared by processes.
+            key = cache.make_and_validate_key(version_key)
+            with cache._lock:
+                current = 0 if cache._has_expired(key) else pickle.loads(cache._cache[key])
+                if current != expected_version:
+                    return False
+                cache._set(key, pickle.dumps(expected_version + 1, cache.pickle_protocol), timeout=None)
+                return True
+
+        if isinstance(cache, PyMemcacheCache):
+            # Django's HashClient supports memcached gets/cas on the same key.
+            # A missing key must be seeded atomically with add(), not set().
+            key = cache.make_and_validate_key(version_key)
+            current, cas_token = cache._cache.gets(key)
+            if current is None:
+                return expected_version == 0 and bool(cache.add(version_key, 1, timeout=None))
+            if int(current) != expected_version:
+                return False
+            return cache._cache.cas(key, expected_version + 1, cas_token, expire=0, noreply=False) is True
+
+        redis_backend = any(
+            cls.__module__ == "django.core.cache.backends.redis" and cls.__name__ == "RedisCache"
+            for cls in type(cache).__mro__
+        )
+        if not redis_backend:
+            raise NotImplementedError("Atomic JWT logout-all requires RedisCache, PyMemcacheCache, or LocMemCache")
+
+        # Cache key transformations must match get_user_version(); choose the
+        # write primary rather than a potentially lagging Redis read replica.
+        key = cache.make_key(version_key)
+        client = cache._cache.get_client(key, write=True)
+        return bool(client.eval(_REDIS_COMPARE_AND_BUMP, 1, key, str(expected_version)))
+
     async def revoke_family(self, fam: str, *, exp: int | None = None) -> None:
         key = f"{self.key_prefix}fam:{fam}"
         self.cache.set(key, "1", timeout=_ttl_for(exp, self.default_ttl))
 
     async def is_family_revoked(self, fam: str) -> bool:
-        return self.cache.get(f"{self.key_prefix}fam:{fam}") is not None
+        return self._get_revocation_state(f"{self.key_prefix}fam:{fam}") is not None
 
 
 class DjangoORMRevocation(RevocationStore):

@@ -65,6 +65,31 @@ class JWTAuthViews:
         response.delete_cookie(self.refresh_cookie, path=self.prefix)
         return response
 
+    async def _require_active_refresh(self, request: Any) -> dict[str, Any]:
+        """Check stateful refresh validity before a logout changes session state.
+
+        The shared Rust backend checks signature, expiry and token type, but
+        intentionally does not pre-check revocation: /refresh must see a reused
+        token to revoke its whole rotation family.
+        """
+        claims = request["context"]["auth_claims"]
+        jti = claims.get("jti")
+        if not isinstance(jti, str) or not jti or await self.store.is_revoked(jti):
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        fam = claims.get("fam")
+        if fam is not None and (not isinstance(fam, str) or not fam or await self.store.is_family_revoked(fam)):
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        try:
+            version = int(claims.get("ver", 0))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=401, detail="Invalid token") from None
+        user_id = request["context"]["user_id"]
+        if version != await self.store.get_user_version(user_id):
+            raise HTTPException(status_code=401, detail="Invalid token")
+        return claims
+
     def register(self, api: Any) -> None:
         """Attach the four lifecycle routes to a :class:`BoltAPI`."""
         refresh_auth = JWTAuthentication(
@@ -134,8 +159,11 @@ class JWTAuthViews:
             summary="Log out",
         )
         async def logout(request: Any):
-            claims = request["context"]["auth_claims"]
-            await self.store.revoke_family(claims["fam"], exp=claims.get("exp"))
+            claims = await self._require_active_refresh(request)
+            fam = claims.get("fam")
+            if not isinstance(fam, str) or not fam:
+                raise HTTPException(status_code=401, detail="Invalid token")
+            await self.store.revoke_family(fam, exp=claims.get("exp"))
             return self._clear_cookies(JSON({"ok": True}))
 
         @api.post(
@@ -146,5 +174,13 @@ class JWTAuthViews:
             summary="Log out everywhere",
         )
         async def logout_all(request: Any):
-            await self.store.bump_user_version(request["context"]["user_id"])
+            claims = await self._require_active_refresh(request)
+            try:
+                updated = await self.store.bump_user_version_if_current(
+                    request["context"]["user_id"], int(claims.get("ver", 0))
+                )
+            except (AttributeError, NotImplementedError) as exc:
+                raise HTTPException(status_code=503, detail="Atomic global logout unavailable") from exc
+            if not updated:
+                raise HTTPException(status_code=401, detail="Invalid token")
             return self._clear_cookies(JSON({"ok": True}))
