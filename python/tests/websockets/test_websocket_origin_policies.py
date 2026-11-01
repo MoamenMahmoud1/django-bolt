@@ -6,6 +6,7 @@ from django.test import override_settings
 
 from django_bolt import BoltAPI, WebSocket
 from django_bolt.testing import WebSocketTestClient
+from django_bolt.websocket.origin_policy import resolve_origin_options
 
 
 async def mounted(scope, receive, send):
@@ -188,7 +189,8 @@ async def test_custom_can_explicitly_allow_missing_origin_after_validation():
 
 
 def test_global_delegate_is_not_an_implicit_security_opt_out():
-    with override_settings(BOLT_WEBSOCKET_ORIGIN_POLICY="delegate"):
-        with pytest.raises(ValueError, match="delegate must be selected explicitly"):
-            from django_bolt.websocket.origin_policy import resolve_origin_options
-            resolve_origin_options(asgi=True)
+    with (
+        override_settings(BOLT_WEBSOCKET_ORIGIN_POLICY="delegate"),
+        pytest.raises(ValueError, match="delegate must be selected explicitly"),
+    ):
+        resolve_origin_options(asgi=True)

@@ -77,10 +77,10 @@ def test_native_custom_and_any_on_real_server(make_server_project):
         default_reject, _ = check("/ws/echo", "https://random.example")
         default_allowed, _ = check("/ws/echo", "https://global.example")
 
-    assert " 101 " in trusted[0]
-    assert " 403 " in evil[0] and evil_body == REJECTED_BODY
-    assert " 403 " in missing[0] and missing_body == REJECTED_BODY
-    assert " 101 " in public[0]
-    assert " 101 " in public_missing[0]
-    assert " 403 " in default_reject[0]
-    assert " 101 " in default_allowed[0]
+    assert " 101 " in trusted
+    assert " 403 " in evil and evil_body == REJECTED_BODY
+    assert " 403 " in missing and missing_body == REJECTED_BODY
+    assert " 101 " in public
+    assert " 101 " in public_missing
+    assert " 403 " in default_reject
+    assert " 101 " in default_allowed

@@ -1,9 +1,9 @@
 //! WebSocket router for matching paths to handlers
 
 use ahash::AHashMap;
+use bolt_core::state::{WebSocketOriginPolicy, parse_websocket_origin_policy};
 use pyo3::prelude::*;
 use std::sync::Arc;
-use bolt_core::state::{WebSocketOriginPolicy, parse_websocket_origin_policy};
 
 /// WebSocket route definition
 pub struct WebSocketRoute {

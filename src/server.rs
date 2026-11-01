@@ -613,7 +613,14 @@ pub fn register_websocket_routes(
 ) -> PyResult<()> {
     let mut router = WebSocketRouter::new();
     for (path, handler_id, handler, injector, origin_config) in routes {
-        router.register(&path, handler_id, handler, injector, Some(origin_config.bind(py)), py)?;
+        router.register(
+            &path,
+            handler_id,
+            handler,
+            injector,
+            Some(origin_config.bind(py)),
+            py,
+        )?;
     }
     GLOBAL_WEBSOCKET_ROUTER.set(Arc::new(router)).map_err(|_| {
         pyo3::exceptions::PyRuntimeError::new_err("WebSocket router already initialized")

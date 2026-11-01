@@ -23,9 +23,9 @@ from httpx import Response
 
 from django_bolt import BoltAPI, _core
 from django_bolt._bridge import make_bound_dispatch
-from django_bolt.api import _validate_asgi_mount_conflicts, _validate_mcp_mount_conflicts, _resolved_asgi_mounts
-from django_bolt.websocket.origin_policy import OriginOptions, resolve_origin_options
+from django_bolt.api import _resolved_asgi_mounts, _validate_asgi_mount_conflicts, _validate_mcp_mount_conflicts
 from django_bolt.testing.dbshare import SharedConnections
+from django_bolt.websocket.origin_policy import OriginOptions, resolve_origin_options
 
 logger = logging.getLogger(__name__)
 

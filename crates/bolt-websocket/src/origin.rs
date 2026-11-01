@@ -50,11 +50,16 @@ pub fn validate_mount_origin(
 ) -> bool {
     match policy {
         WebSocketOriginPolicy::Inherit { allow_missing } => {
-            if origin.is_none() && !*allow_missing { return false; }
+            if origin.is_none() && !*allow_missing {
+                return false;
+            }
             validate_origin(origin, cors_config)
         }
         WebSocketOriginPolicy::Delegate => true,
-        WebSocketOriginPolicy::Allowlist { origins, allow_missing } => match origin {
+        WebSocketOriginPolicy::Allowlist {
+            origins,
+            allow_missing,
+        } => match origin {
             None => *allow_missing,
             Some(value) => value.to_str().ok().is_some_and(|v| origins.contains(v)),
         },
@@ -76,10 +81,18 @@ fn valid_web_origin(value: &str) -> bool {
     if value.is_empty() || value == "null" || value.bytes().any(|b| b.is_ascii_whitespace()) {
         return false;
     }
-    let Ok(uri) = value.parse::<actix_web::http::Uri>() else { return false };
-    if !matches!(uri.scheme_str(), Some("http" | "https")) { return false; }
-    let Some(authority) = uri.authority() else { return false };
-    if authority.as_str().contains('@') || authority.host().is_empty() { return false; }
+    let Ok(uri) = value.parse::<actix_web::http::Uri>() else {
+        return false;
+    };
+    if !matches!(uri.scheme_str(), Some("http" | "https")) {
+        return false;
+    }
+    let Some(authority) = uri.authority() else {
+        return false;
+    };
+    if authority.as_str().contains('@') || authority.host().is_empty() {
+        return false;
+    }
     format!("{}://{}", uri.scheme_str().unwrap_or_default(), authority) == value
 }
 
@@ -178,26 +191,39 @@ mod tests {
     #[test]
     fn mount_origin_inherit_keeps_the_global_security_policy() {
         let configured = cors(&["https://allowed.example"], &[], false);
-        let policy = WebSocketOriginPolicy::Inherit { allow_missing: true };
+        let policy = WebSocketOriginPolicy::Inherit {
+            allow_missing: true,
+        };
         assert!(validate_mount_origin(
-            Some(&origin("https://allowed.example")), Some(&configured), &policy
+            Some(&origin("https://allowed.example")),
+            Some(&configured),
+            &policy
         ));
         assert!(!validate_mount_origin(
-            Some(&origin("https://evil.example")), Some(&configured), &policy
+            Some(&origin("https://evil.example")),
+            Some(&configured),
+            &policy
         ));
         assert!(validate_mount_origin(None, Some(&configured), &policy));
         assert!(!validate_mount_origin(
-            Some(&origin("https://allowed.example")), None, &policy
+            Some(&origin("https://allowed.example")),
+            None,
+            &policy
         ));
     }
 
     #[test]
     fn mount_origin_explicit_allowlist_requires_exact_origin() {
         let origins = HashSet::from(["https://mount.example".to_string()]);
-        let policy = WebSocketOriginPolicy::Allowlist { origins, allow_missing: false };
+        let policy = WebSocketOriginPolicy::Allowlist {
+            origins,
+            allow_missing: false,
+        };
         let global = cors(&["https://other.example"], &[], false);
         assert!(validate_mount_origin(
-            Some(&origin("https://mount.example")), Some(&global), &policy
+            Some(&origin("https://mount.example")),
+            Some(&global),
+            &policy
         ));
         for rejected in [
             "http://mount.example",
@@ -206,23 +232,37 @@ mod tests {
             "null",
         ] {
             assert!(!validate_mount_origin(
-                Some(&origin(rejected)), Some(&global), &policy
+                Some(&origin(rejected)),
+                Some(&global),
+                &policy
             ));
         }
         assert!(!validate_mount_origin(None, Some(&global), &policy));
         // An explicit mount allowlist still wins over globally permissive CORS.
         let globally_open = cors(&[], &[], true);
         assert!(!validate_mount_origin(
-            Some(&origin("https://evil.example")), Some(&globally_open), &policy
+            Some(&origin("https://evil.example")),
+            Some(&globally_open),
+            &policy
         ));
     }
 
     #[test]
     fn any_origin_is_explicit_and_rejects_null_or_missing() {
-        let policy = WebSocketOriginPolicy::Any { allow_missing: false };
-        assert!(validate_mount_origin(Some(&origin("https://other.example")), None, &policy));
+        let policy = WebSocketOriginPolicy::Any {
+            allow_missing: false,
+        };
+        assert!(validate_mount_origin(
+            Some(&origin("https://other.example")),
+            None,
+            &policy
+        ));
         assert!(!validate_mount_origin(Some(&origin("null")), None, &policy));
-        assert!(!validate_mount_origin(Some(&origin("https://other.example/path")), None, &policy));
+        assert!(!validate_mount_origin(
+            Some(&origin("https://other.example/path")),
+            None,
+            &policy
+        ));
         assert!(!validate_mount_origin(None, None, &policy));
     }
 
@@ -230,7 +270,9 @@ mod tests {
     fn mount_origin_delegate_is_an_explicit_opt_out() {
         let policy = WebSocketOriginPolicy::Delegate;
         assert!(validate_mount_origin(
-            Some(&origin("https://arbitrary.example")), None, &policy
+            Some(&origin("https://arbitrary.example")),
+            None,
+            &policy
         ));
         assert!(validate_mount_origin(None, None, &policy));
     }

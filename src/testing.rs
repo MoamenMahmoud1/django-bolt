@@ -467,7 +467,14 @@ pub fn register_test_websocket_routes(
 
     let mut ws_router = WebSocketRouter::new();
     for (path, handler_id, handler, injector, origin_config) in routes {
-        ws_router.register(&path, handler_id, handler, injector, Some(origin_config.bind(py)), py)?;
+        ws_router.register(
+            &path,
+            handler_id,
+            handler,
+            injector,
+            Some(origin_config.bind(py)),
+            py,
+        )?;
     }
     app.websocket_router = Arc::new(ws_router);
     Ok(())
@@ -851,9 +858,10 @@ pub fn handle_test_websocket(
                         Some(("127.0.0.1".to_string(), 0)),
                     )?;
                     if let Some(validator) = custom {
-                        scope.bind(py).cast::<PyDict>()?.set_item(
-                            "_bolt_origin_validator", validator.clone_ref(py),
-                        )?;
+                        scope
+                            .bind(py)
+                            .cast::<PyDict>()?
+                            .set_item("_bolt_origin_validator", validator.clone_ref(py))?;
                     }
                     Ok((
                         true,
@@ -874,15 +882,21 @@ pub fn handle_test_websocket(
     let allowed = match origin {
         Some(value) => HeaderValue::from_str(value).is_ok_and(|h| {
             bolt_websocket::origin::validate_mount_origin(
-                Some(&h), app.config.global_cors_config.as_ref(), &route.origin_policy,
+                Some(&h),
+                app.config.global_cors_config.as_ref(),
+                &route.origin_policy,
             )
         }),
         None => bolt_websocket::origin::validate_mount_origin(
-            None, app.config.global_cors_config.as_ref(), &route.origin_policy,
+            None,
+            app.config.global_cors_config.as_ref(),
+            &route.origin_policy,
         ),
     };
     if !allowed {
-        return Err(pyo3::exceptions::PyPermissionError::new_err("Origin not allowed"));
+        return Err(pyo3::exceptions::PyPermissionError::new_err(
+            "Origin not allowed",
+        ));
     }
 
     let handler_id = route.handler_id;

@@ -30,9 +30,9 @@ from typing import Any
 
 from django_bolt import BoltAPI, _core
 from django_bolt.api import _resolved_asgi_mounts
-from django_bolt.websocket.origin_policy import OriginOptions, resolve_origin_options
 from django_bolt.websocket import CloseCode, WebSocket
 from django_bolt.websocket.handlers import build_websocket_request, get_websocket_param_name
+from django_bolt.websocket.origin_policy import OriginOptions, resolve_origin_options
 
 # Each WebSocketTestClient is one connection with its own test app. The
 # connections to one API share its rate-limit buckets, as the connections to

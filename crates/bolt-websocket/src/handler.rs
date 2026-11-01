@@ -19,7 +19,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::{mpsc, oneshot};
 
 use bolt_core::metadata::RouteMetadata;
-use bolt_core::state::WebSocketOriginPolicy;
 use bolt_core::middleware::auth::{AuthContext, populate_auth_context};
 use bolt_core::middleware::client_ip::{TrustedProxies, resolve_scheme};
 use bolt_core::middleware::rate_limit::{check_after_auth, check_before_auth};
@@ -29,6 +28,7 @@ use bolt_core::request_pipeline::{
 };
 use bolt_core::router::parse_query_string;
 use bolt_core::state::AppState;
+use bolt_core::state::WebSocketOriginPolicy;
 use bolt_core::type_coercion::TypeHints;
 use bolt_core::validation::{AuthGuardResult, validate_auth_and_guards};
 
@@ -668,14 +668,18 @@ async fn check_custom_origin(
     query: &str,
     headers: &AHashMap<String, String>,
 ) -> bool {
-    let WebSocketOriginPolicy::Custom { validator, .. } = policy else { return true };
+    let WebSocketOriginPolicy::Custom { validator, .. } = policy else {
+        return true;
+    };
     let origin = origin.and_then(|v| v.to_str().ok()).map(str::to_owned);
     let future = Python::attach(|py| -> PyResult<_> {
         let context = PyDict::new(py);
         context.set_item("path", path)?;
         context.set_item("query_string", query)?;
         let h = PyDict::new(py);
-        for (k, v) in headers { h.set_item(k, v)?; }
+        for (k, v) in headers {
+            h.set_item(k, v)?;
+        }
         context.set_item("headers", h)?;
         let coro = validator.call1(py, (origin, context))?;
         let locals = bolt_loop::worker_task_locals(py)?;
@@ -802,10 +806,14 @@ pub async fn handle_websocket_upgrade(
     // An ASGI mount may explicitly choose a dedicated allowlist or delegate
     // validation to its own middleware. No Python runs for this check.
     let selected_origin_policy = match &target {
-        WsTarget::Route { origin_policy, .. } | WsTarget::AsgiMount { origin_policy, .. } => origin_policy,
+        WsTarget::Route { origin_policy, .. } | WsTarget::AsgiMount { origin_policy, .. } => {
+            origin_policy
+        }
     };
     let origin_allowed = origin::validate_mount_origin(
-        req.headers().get(ORIGIN), state.global_cors_config.as_ref(), selected_origin_policy,
+        req.headers().get(ORIGIN),
+        state.global_cors_config.as_ref(),
+        selected_origin_policy,
     );
     if !origin_allowed {
         return Ok(HttpResponse::Forbidden()
@@ -861,11 +869,17 @@ pub async fn handle_websocket_upgrade(
 
     // Evaluate optional Python custom policy after native auth/guards but
     // before HTTP 101. Denied unauthenticated calls do not run Python.
-    if matches!(selected_origin_policy.as_ref(), WebSocketOriginPolicy::Custom { .. })
-        && !check_custom_origin(
-            selected_origin_policy, req.headers().get(ORIGIN), req.path(),
-            req.query_string(), &headers,
-        ).await
+    if matches!(
+        selected_origin_policy.as_ref(),
+        WebSocketOriginPolicy::Custom { .. }
+    ) && !check_custom_origin(
+        selected_origin_policy,
+        req.headers().get(ORIGIN),
+        req.path(),
+        req.query_string(),
+        &headers,
+    )
+    .await
     {
         return Ok(HttpResponse::Forbidden()
             .content_type("application/json")

@@ -85,7 +85,6 @@ from .openapi import (
 )
 from .openapi.routes import OpenAPIRouteRegistrar
 from .pagination import extract_pagination_item_type, paginate
-from .websocket.origin_policy import OriginOptions, resolve_origin_options
 from .responses import JSON as _JSONResponse
 from .router import Router
 from .serialization import (
@@ -107,6 +106,7 @@ from .status_codes import HTTP_201_CREATED, HTTP_204_NO_CONTENT
 from .typing import HandlerMetadata, HandlerPattern
 from .views import APIView, ViewSet, _copy_route_middleware, _layer
 from .websocket import mark_websocket_handler
+from .websocket.origin_policy import OriginOptions, resolve_origin_options
 
 logger = logging.getLogger(__name__)
 
