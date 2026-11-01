@@ -264,6 +264,20 @@ The handshake sets `Sec-WebSocket-Protocol`, `Sec-WebSocket-Accept`,
 `Sec-WebSocket-Extensions`, `Upgrade` and `Connection`. `accept()` raises
 `ValueError` for these headers. Select the subprotocol with `subprotocol=...`.
 
+## Origin policy
+
+Browsers send an `Origin` header on WebSocket handshakes, including
+same-origin connections. Native `@api.websocket` routes check this header
+against the global `CORS_ALLOWED_ORIGINS` and
+`CORS_ALLOWED_ORIGIN_REGEXES` settings (or `CORS_ALLOW_ALL_ORIGINS`).
+Without a configured allowlist, browser requests with an Origin are denied.
+Non-browser clients may omit or forge Origin: it is not authentication.
+
+Mounted ASGI applications do **not** inherit Bolt's WebSocket Origin check.
+The mounted application must validate origins itself, for example with
+Django Channels' `OriginValidator` or `AllowedHostsOriginValidator`;
+see [ASGI mounts](asgi-mounts.md#middleware-boundary).
+
 ## Authentication
 
 Apply authentication to WebSocket endpoints:
