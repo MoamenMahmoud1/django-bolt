@@ -392,7 +392,9 @@ class TestClient(httpx.Client):
 
         # Register HTTP ASGI mounts
         if api._asgi_mounts:
-            _core.register_test_asgi_mounts(self.app_id, _resolved_asgi_mounts(api._asgi_mounts, read_settings=read_django_settings))
+            _core.register_test_asgi_mounts(
+                self.app_id, _resolved_asgi_mounts(api._asgi_mounts, read_settings=read_django_settings)
+            )
 
         # Register MCP mounts (served by the Rust rmcp core, like production)
         if api._mcp_mounts:
@@ -704,7 +706,9 @@ class AsyncTestClient(httpx.AsyncClient):
 
         # Register HTTP ASGI mounts
         if api._asgi_mounts:
-            _core.register_test_asgi_mounts(self.app_id, _resolved_asgi_mounts(api._asgi_mounts, read_settings=read_django_settings))
+            _core.register_test_asgi_mounts(
+                self.app_id, _resolved_asgi_mounts(api._asgi_mounts, read_settings=read_django_settings)
+            )
 
         # Register MCP mounts (served by the Rust rmcp core, like production)
         if api._mcp_mounts:
