@@ -5,7 +5,7 @@ import json
 import pytest
 
 from .apps import app_module
-from .helpers import ServerProject, SimpleWebSocketClient
+from .helpers import ServerProject, SimpleWebSocketClient, attempt_ws_upgrade
 
 pytestmark = pytest.mark.server_integration
 
@@ -29,6 +29,32 @@ def test_mounted_asgi_app_serves_websocket(make_server_project):
 
     assert code == 1000
     assert reason == "done"
+
+
+
+@pytest.mark.parametrize(
+    "cors_settings",
+    ["", 'CORS_ALLOWED_ORIGINS = ["https://allowed-by-bolt.example"]'],
+)
+def test_mounted_asgi_app_owns_websocket_origin_policy(make_server_project, cors_settings):
+    """Bolt rejects a disallowed Origin on native routes, not on ASGI mounts."""
+    project = make_server_project(
+        api_module=app_module("ws_asgi_mount"),
+        settings_extra=cors_settings,
+    )
+
+    with project.start() as server:
+        headers = {"Origin": "https://managed-by-asgi.example"}
+        mount_status, _ = attempt_ws_upgrade(
+            server.host, server.port, "/mounted/ws", headers=headers
+        )
+        native_status, native_body = attempt_ws_upgrade(
+            server.host, server.port, "/ws/direct", headers=headers
+        )
+
+    assert " 101 " in mount_status, mount_status
+    assert " 403 " in native_status, native_status
+    assert native_body == '{"detail":"Origin not allowed"}'
 
 
 def test_mounted_asgi_websocket_scope_follows_spec(make_server_project):
