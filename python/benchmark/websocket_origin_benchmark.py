@@ -11,6 +11,7 @@ is executed. Repeat on the same machine with release builds and low load.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import gc
 import inspect
 import json
@@ -90,15 +91,49 @@ def measure(path: str, policy: str, count: int, repeats: int) -> dict:
         client._cleanup_app()
 
 
+async def full_handshake_roundtrips(policy: str, count: int) -> dict:
+    """Measure a complete in-process Rust-routed WebSocket accept/close cycle."""
+    api = BoltAPI()
+    kwargs = {}
+    if policy == "allowlist":
+        kwargs = {
+            "websocket_origin_policy": "allowlist",
+            "websocket_allowed_origins": ["https://allowed.example"],
+        }
+    elif policy == "delegate":
+        kwargs = {"websocket_origin_policy": "delegate"}
+    api.mount_asgi("/mounted", echo_app, **kwargs)
+    client_args = {
+        "headers": {"Origin": "https://allowed.example"},
+        "cors_allowed_origins": ["https://allowed.example"],
+        "read_django_settings": False,
+    }
+    samples = []
+    for iteration in range(count + 15):
+        start = time.perf_counter_ns()
+        async with WebSocketTestClient(api, "/mounted/ws", **client_args) as ws:
+            assert ws.accepted
+        elapsed = time.perf_counter_ns() - start
+        if iteration >= 15:
+            samples.append(elapsed)
+    ordered = sorted(samples)
+    return {
+        "policy": policy,
+        "median_ns_per_connection": round(statistics.median(samples)),
+        "p95_ns_per_connection": round(ordered[int(0.95 * (len(ordered) - 1))]),
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path)
     parser.add_argument("--compare", type=Path)
     parser.add_argument("--count", type=int, default=3000)
+    parser.add_argument("--roundtrips", type=int, default=250)
     parser.add_argument("--repeats", type=int, default=9)
     args = parser.parse_args()
-    if args.count < 1 or args.repeats < 1:
-        parser.error("count and repeats must be positive")
+    if args.count < 1 or args.repeats < 1 or args.roundtrips < 1:
+        parser.error("count, repeats and roundtrips must be positive")
 
     rows = [
         measure("/native/ws", "native", args.count, args.repeats),
@@ -112,7 +147,14 @@ def main():
                 measure("/mounted/ws", "delegate", args.count, args.repeats),
             ]
         )
+    roundtrips = [asyncio.run(full_handshake_roundtrips("inherit", args.roundtrips))]
+    if "websocket_origin_policy" in inspect.signature(BoltAPI.mount_asgi).parameters:
+        roundtrips.extend([
+            asyncio.run(full_handshake_roundtrips("allowlist", args.roundtrips)),
+            asyncio.run(full_handshake_roundtrips("delegate", args.roundtrips)),
+        ])
     result = {
+        "roundtrips": roundtrips,
         "python": platform.python_version(),
         "platform": platform.platform(),
         "count": args.count,
@@ -134,6 +176,14 @@ def main():
                 print(f"{row['policy']}: {before} -> {after} ns/call ({(after / before - 1) * 100:+.2f}%)")
             else:
                 print(f"{row['policy']}: new feature, no baseline counterpart")
+        old_handshakes = {entry["policy"]: entry for entry in baseline.get("roundtrips", [])}
+        for entry in roundtrips:
+            old = old_handshakes.get(entry["policy"])
+            if old:
+                before = old["median_ns_per_connection"]
+                after = entry["median_ns_per_connection"]
+                print(f"full {entry['policy']}: {before} -> {after} ns/connection "
+                      f"({(after / before - 1) * 100:+.2f}%)")
 
 
 if __name__ == "__main__":
