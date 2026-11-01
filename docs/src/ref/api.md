@@ -240,7 +240,7 @@ Notes:
 
 ### WebSocket decorator
 
-#### @api.websocket(path, *, name=None, guards=None, auth=None, tags=None, summary=None, description=None, include_in_schema=None)
+#### @api.websocket(path, *, name=None, guards=None, auth=None, tags=None, summary=None, description=None, include_in_schema=None, origin_policy=None, allowed_origins=None, allow_missing_origin=None, origin_validator=None)
 
 Register a WebSocket endpoint. `tags` sets the OpenAPI tags. The default is `["WebSocket"]`.
 `summary`, `description` and `include_in_schema` work as on HTTP routes.
@@ -250,6 +250,18 @@ Register a WebSocket endpoint. `tags` sets the OpenAPI tags. The default is `["W
 async def websocket_handler(websocket: WebSocket):
     await websocket.accept()
 ```
+
+`origin_policy` accepts `"inherit"`, `"allowlist"`, `"any"`, or `"custom"`.
+`None` uses `BOLT_WEBSOCKET_ORIGIN_POLICY`, which defaults to `"inherit"`.
+Set `allowed_origins` to a nonempty exact list for `"allowlist"`.
+Set `origin_validator` to a sync or async callable, or its dotted path, for `"custom"`.
+Its signature is `(origin, context) -> bool | Awaitable[bool]`.
+Context contains `path`, `query_string`, and lower-case `headers`.
+`allow_missing_origin=None` uses settings, then the policy default.
+Only `"inherit"` permits missing Origin by default.
+Custom validation must approve a permitted missing Origin too.
+Validation runs before HTTP 101. Authentication and guards still apply.
+See [Origin policy](../topics/websocket.md#origin-policy) for examples and validation errors.
 
 ### API mounting
 

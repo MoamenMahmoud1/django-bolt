@@ -7,27 +7,42 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from ipaddress import IPv6Address
+from typing import Any, Literal, TypedDict
 from urllib.parse import urlsplit
 
 from django.conf import settings
 from django.utils.module_loading import import_string
 
+NativeOriginPolicy = Literal["inherit", "allowlist", "any", "custom"]
+MountOriginPolicy = Literal["inherit", "allowlist", "any", "custom", "delegate"]
+
+
+class OriginContext(TypedDict):
+    """Handshake request data. Client headers do not prove identity."""
+
+    path: str
+    query_string: str
+    headers: dict[str, str]
+
+
+OriginValidator = Callable[[str | None, OriginContext], bool | Awaitable[bool]]
+
 
 @dataclass(frozen=True)
 class OriginOptions:
-    policy: str | None = None
+    policy: MountOriginPolicy | None = None
     allowed_origins: list[str] | None = None
     allow_missing_origin: bool | None = None
-    validator: Callable[..., Any] | str | None = None
+    validator: OriginValidator | str | None = None
 
 
 class ResolvedOrigin:
     """Registration wire format read exactly once by the Rust core."""
 
-    def __init__(self, policy: str, origins: list[str], missing: bool, validator: Callable[..., Any] | None):
+    def __init__(self, policy: str, origins: list[str], missing: bool, validator: OriginValidator | None):
         self._bolt_websocket_origin_policy = policy
         self._bolt_websocket_allowed_origins = origins
         self._bolt_websocket_allow_missing_origin = missing
@@ -35,13 +50,21 @@ class ResolvedOrigin:
 
 
 def _valid_origin(origin: str) -> bool:
-    if not origin or any(c.isspace() for c in origin):
+    if not origin or not origin.isascii() or any(ord(c) <= 32 or ord(c) == 127 for c in origin):
         return False
     try:
         parsed = urlsplit(origin)
+        host = parsed.hostname
+        if not host or parsed.netloc.endswith(":"):
+            return False
+        if ":" in host:
+            IPv6Address(host)
+            if "%" in host:
+                return False
+        elif any(c not in "abcdefghijklmnopqrstuvwxyz0123456789.-_" for c in host):
+            return False
         return (
             parsed.scheme in ("http", "https")
-            and bool(parsed.hostname)
             and parsed.username is None
             and parsed.password is None
             and parsed.path == ""
@@ -103,7 +126,7 @@ def resolve_origin_options(
             raise ValueError("Origin policy='custom' requires a callable origin_validator")
         func = validator
 
-        async def checked(origin: str | None, context: dict[str, Any]) -> bool:
+        async def checked(origin: str | None, context: OriginContext) -> bool:
             if inspect.iscoroutinefunction(func):
                 result = await func(origin, context)
             else:

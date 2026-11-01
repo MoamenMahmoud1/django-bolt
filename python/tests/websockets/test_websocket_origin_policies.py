@@ -1,10 +1,13 @@
 """Security, flexibility and precedence of global/per-endpoint WS Origin policies."""
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from django.test import override_settings
 
 from django_bolt import BoltAPI, WebSocket
+from django_bolt.auth import IsAuthenticated
 from django_bolt.testing import WebSocketTestClient
 from django_bolt.websocket.origin_policy import resolve_origin_options
 
@@ -194,3 +197,107 @@ def test_global_delegate_is_not_an_implicit_security_opt_out():
         pytest.raises(ValueError, match="delegate must be selected explicitly"),
     ):
         resolve_origin_options(asgi=True)
+
+
+@pytest.mark.parametrize("origin", [
+    "https://example.com:0", "https://example.com:65536", "https://example.com:",
+    "https://exa\x00mple.com", "https://é.example", "https://example.com\\evil",
+    "https://[not-ipv6]", "https://user@example.com", "https://example.com?",
+    "https://example.com#", "ftp://example.com", "null",
+])
+def test_allowlist_rejects_malformed_configured_origins(origin):
+    with pytest.raises(ValueError, match="Invalid WebSocket origin"):
+        make_api(native_options={"origin_policy": "allowlist", "allowed_origins": [origin]})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("origin", [
+    "https://example.com:0", "https://example.com:65536", "https://example.com:",
+    "https://[not-ipv6]", "https://example.com/path", "https://user@example.com",
+    "https://example.com?", "https://example.com#", "https://example.com,https://evil.example",
+])
+async def test_any_rejects_malformed_origin_authority(origin):
+    api = make_api(native_options={"origin_policy": "any"})
+    with pytest.raises(PermissionError, match="Origin not allowed"):
+        await connect(api, "/native", origin)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("origin", [
+    "http://localhost", "https://EXAMPLE.com", "https://example.com:443",
+    "http://127.0.0.1:8000", "https://[::1]", "http://[2001:db8::1]:65535",
+])
+async def test_explicit_policies_accept_serialized_web_origins(origin):
+    for options in (
+        {"origin_policy": "any"},
+        {"origin_policy": "allowlist", "allowed_origins": [origin]},
+    ):
+        assert await connect(make_api(native_options=options), "/native", origin) == "native"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/native", "/mounted/ws"])
+@pytest.mark.parametrize("policy", ["inherit", "allowlist", "any", "custom"])
+async def test_repeated_origins_cannot_disagree_between_policy_and_context(path, policy):
+    options = {"origin_policy": policy}
+    origins = ["https://first.example", "https://second.example"]
+    if policy == "allowlist":
+        options["allowed_origins"] = origins
+    elif policy == "custom":
+        options["origin_validator"] = lambda _origin, _context: True
+    api = make_api(
+        native_options=options,
+        mount_options={f"websocket_{key}": value for key, value in options.items()},
+    )
+    with pytest.raises(PermissionError, match="Origin not allowed"):
+        async with WebSocketTestClient(
+            api, path, headers={"Origin": origins[0], "origin": origins[1]},
+            cors_allowed_origins=origins, read_django_settings=False,
+        ):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_delegate_leaves_repeated_origin_decisions_to_the_app():
+    api = make_api(mount_options={"websocket_origin_policy": "delegate"})
+    async with WebSocketTestClient(
+        api, "/mounted/ws", headers={"Origin": "https://first.example", "origin": "https://second.example"},
+    ) as ws:
+        assert await ws.receive_text() == "mounted"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/native", "/mounted/ws"])
+async def test_custom_timeout_denies_opening_handshake(path):
+    async def validator(origin, context):
+        await asyncio.sleep(10)
+        return True
+
+    api = make_api(
+        native_options={"origin_policy": "custom", "origin_validator": validator},
+        mount_options={"websocket_origin_policy": "custom", "websocket_origin_validator": validator},
+    )
+    with pytest.raises(PermissionError, match="Origin not allowed"):
+        await connect(api, path, "https://allowed.example")
+
+
+@pytest.mark.asyncio
+async def test_custom_validator_does_not_bypass_native_authentication():
+    seen = []
+
+    def validator(origin, context):
+        seen.append(origin)
+        return True
+
+    api = BoltAPI()
+
+    @api.websocket(
+        "/protected", guards=[IsAuthenticated()],
+        origin_policy="custom", origin_validator=validator,
+    )
+    async def protected(ws: WebSocket):
+        await ws.accept()
+
+    with pytest.raises(PermissionError):
+        await connect(api, "/protected", "https://allowed.example")
+    assert seen == []

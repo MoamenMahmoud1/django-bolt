@@ -793,7 +793,11 @@ pub fn handle_test_websocket(
 
     // Convert headers to map, with the `Cookie` lines joined as in production
     let mut header_map: AHashMap<String, String> = AHashMap::with_capacity(headers.len());
+    let mut origin_count = 0;
     for (name, value) in headers.iter() {
+        if name.eq_ignore_ascii_case("origin") {
+            origin_count += 1;
+        }
         insert_header_line(&mut header_map, &name.to_lowercase(), value);
     }
 
@@ -826,7 +830,13 @@ pub fn handle_test_websocket(
                             &mount.websocket_origin_policy,
                         ),
                     };
-                    if !allowed {
+                    if !allowed
+                        || (origin_count > 1
+                            && !matches!(
+                                mount.websocket_origin_policy.as_ref(),
+                                WebSocketOriginPolicy::Delegate
+                            ))
+                    {
                         return Err(pyo3::exceptions::PyPermissionError::new_err(format!(
                             "Origin not allowed: {}",
                             origin_value.map(String::as_str).unwrap_or("<missing>")
@@ -893,7 +903,7 @@ pub fn handle_test_websocket(
             &route.origin_policy,
         ),
     };
-    if !allowed {
+    if !allowed || origin_count > 1 {
         return Err(pyo3::exceptions::PyPermissionError::new_err(
             "Origin not allowed",
         ));

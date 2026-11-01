@@ -90,10 +90,39 @@ fn valid_web_origin(value: &str) -> bool {
     let Some(authority) = uri.authority() else {
         return false;
     };
-    if authority.as_str().contains('@') || authority.host().is_empty() {
+    let host = authority.host();
+    if host.is_empty() || authority.as_str().contains('@') || authority.as_str().ends_with(':') {
         return false;
     }
-    format!("{}://{}", uri.scheme_str().unwrap_or_default(), authority) == value
+    if host.starts_with('[') {
+        if host
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+            .and_then(|s| s.parse::<std::net::Ipv6Addr>().ok())
+            .is_none()
+        {
+            return false;
+        }
+    } else if !host
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+    {
+        return false;
+    }
+    let suffix = &authority.as_str()[host.len()..];
+    if !suffix.is_empty()
+        && suffix
+            .strip_prefix(':')
+            .and_then(|s| s.parse::<u16>().ok())
+            .is_none_or(|port| port == 0)
+    {
+        return false;
+    }
+    // Compare slices without allocating a formatted Origin on each handshake.
+    value
+        .strip_prefix("http://")
+        .or_else(|| value.strip_prefix("https://"))
+        == Some(authority.as_str())
 }
 
 /// Check if an origin is allowed by the CORS configuration.
@@ -264,6 +293,44 @@ mod tests {
             &policy
         ));
         assert!(!validate_mount_origin(None, None, &policy));
+    }
+
+    #[test]
+    fn any_rejects_malformed_authorities() {
+        for value in [
+            "https://example.com:0",
+            "https://example.com:65536",
+            "https://example.com:",
+            "https://[not-ipv6]",
+            "https://user@example.com",
+            "https://example.com?",
+            "https://example.com#",
+            "https://example.com,https://evil.example",
+        ] {
+            assert!(!super::valid_web_origin(value), "accepted {value}");
+        }
+    }
+
+    #[test]
+    fn any_accepts_serialized_web_origins() {
+        for value in [
+            "http://localhost",
+            "https://EXAMPLE.com",
+            "https://example.com:443",
+            "http://127.0.0.1:8000",
+            "https://[::1]",
+            "http://[2001:db8::1]:65535",
+        ] {
+            assert!(super::valid_web_origin(value), "rejected {value}");
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn any_checks_port_range(port in 0u32..100_000) {
+            let value = format!("https://example.com:{port}");
+            proptest::prop_assert_eq!(super::valid_web_origin(&value), (1..=65535).contains(&port));
+        }
     }
 
     #[test]

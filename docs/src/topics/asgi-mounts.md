@@ -204,6 +204,13 @@ settings are `BOLT_WEBSOCKET_ORIGIN_POLICY`,
 `BOLT_WEBSOCKET_ALLOWED_ORIGINS`,
 `BOLT_WEBSOCKET_ALLOW_MISSING_ORIGIN` and
 `BOLT_WEBSOCKET_ORIGIN_VALIDATOR`.
+The same options apply to `mount_django()` with a custom WebSocket ASGI app.
+Django's default ASGI app remains HTTP only.
+Custom validators receive the full request path, including the mount prefix.
+Their context does not use the rewritten path from the mounted ASGI scope.
+A shared app can have separate policies on separate mounts.
+`delegate` also bypasses the missing-Origin flag.
+
 The policies are parsed once at registration in Rust; custom Python callbacks
 run once per connection before acceptance and fail closed on exceptions or
 timeouts. See [WebSocket Origin policy](websocket.md#origin-policy).

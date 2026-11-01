@@ -271,9 +271,24 @@ headers. Browsers send `Origin` even for same-origin WebSockets. Origin is
 not authentication; non-browser clients can omit or forge it.
 
 With no WebSocket-specific configuration, Bolt retains its historical
-policy: it checks a present Origin against Django's
+policy: it rejects a present Origin when CORS is absent. Otherwise, it checks Django's
 `CORS_ALLOWED_ORIGINS` / `CORS_ALLOWED_ORIGIN_REGEXES` /
 `CORS_ALLOW_ALL_ORIGINS`, and permits an absent Origin.
+
+Previously, native routes and ASGI mounts shared this global CORS check.
+They could not select separate allowlists or custom validators.
+A mount could not explicitly transfer validation to its own middleware.
+These policies add those controls without changing the default behavior.
+
+Exact allowlist matching does not normalize case, ports, or host names.
+Use the exact Origin that the browser sends.
+For example, `https://app.example` and `https://app.example:443` differ.
+Use ASCII host names, including punycode for international domain names.
+The `allowlist` and `any` policies accept IPv4 and bracketed IPv6 addresses.
+Ports must be between 1 and 65535. An empty port is invalid.
+Allowlist entries cannot contain credentials, paths, queries, fragments, or wildcards.
+These syntax restrictions apply to allowlist entries and the `any` policy.
+Custom validators decide which Origin values they permit.
 
 ### Global defaults: settings.py
 
@@ -282,7 +297,7 @@ BOLT_WEBSOCKET_ORIGIN_POLICY = "allowlist"  # inherit / allowlist / any / custom
 BOLT_WEBSOCKET_ALLOWED_ORIGINS = ["https://app.example.com"]
 BOLT_WEBSOCKET_ALLOW_MISSING_ORIGIN = False
 # Only for policy="custom":
-# BOLT_WEBSOCKET_ORIGIN_VALIDATOR = "myproject.security.validate_ws_origin"
+# BOLT_WEBSOCKET_ORIGIN_VALIDATOR = "myproject.security.validate_tenant_origin"
 ```
 
 An endpoint overrides only the explicitly provided fields. These defaults
@@ -311,7 +326,10 @@ policy preserves the legacy missing-Origin behavior unless overridden.
 ### Custom validation
 
 ```python
-def validate_tenant_origin(origin: str | None, context: dict) -> bool:
+from django_bolt.websocket.origin_policy import OriginContext
+
+
+def validate_tenant_origin(origin: str | None, context: OriginContext) -> bool:
     # Validate origin against trusted tenant configuration. Client-supplied
     # Host/headers and path strings are NOT authentication or tenant proof.
     return origin == "https://tenant.example.com"
@@ -325,7 +343,14 @@ async def tenant_socket(ws: WebSocket):
     await ws.accept()
 ```
 
-A validator may also be `async def`. It receives `(origin, context)`;
+A validator may also be `async def`:
+
+```python
+async def validate_origin_async(origin: str | None, context: OriginContext) -> bool:
+    return origin == "https://tenant.example.com"
+```
+
+A validator receives `(origin, context)`;
 `context` contains `path`, `query_string` and lower-case `headers`.
 It **must return a bool**. Exceptions, non-boolean values and timeouts
 (5 seconds) reject the handshake with HTTP 403. Missing Origin is rejected
@@ -333,6 +358,10 @@ by default for custom policies unless allowed explicitly; even then the
 validator still has to approve it. Python runs only for `custom`, once per
 handshake, and is slower than the Rust-only policies. Avoid slow database
 operations or untrusted tenant identifiers. Never use Origin as auth.
+Sync callbacks run in a thread. Cancellation cannot stop a running sync callback.
+Keep callbacks bounded and free of side effects.
+The context path includes the mount prefix. The query string is a string without `?`.
+Headers are client input, not trusted tenant or identity data.
 
 ### Mounted ASGI applications
 
@@ -343,6 +372,30 @@ Mounts can also explicitly use `"delegate"` when the ASGI app already
 checks Origin itself, for example via Django Channels' `OriginValidator`.
 This is a security-sensitive opt-out, not an Origin-validation mode for
 native Bolt routes. See [ASGI mounts](asgi-mounts.md#middleware-boundary).
+
+### Validation and migration
+
+Invalid policies and allowlists raise `ValueError` at registration or startup.
+A missing custom callable or incompatible local option also raises `ValueError`.
+A non-boolean `allow_missing_origin` raises `TypeError`.
+A dotted validator path must import successfully.
+Only the selected policy uses its global allowlist or validator.
+Local allowlists and validators require their corresponding policy.
+
+Existing applications need no changes when the new settings are absent.
+Each explicit field overrides its global counterpart; other fields still use settings.
+Thus, a global missing-Origin flag also applies when a route selects another policy.
+Explicit `"inherit"` selects CORS behavior, even under a global custom policy.
+`"delegate"` is valid only as an explicit mount option, never as a global setting.
+It bypasses the missing-Origin flag too.
+
+Bolt rejects repeated Origin header lines, except when a mount explicitly delegates validation.
+Previously, different checks could read different lines. Do not send repeated Origin headers.
+The `inherit` policy otherwise retains its existing matching rules.
+
+All checks finish before HTTP 101. Native authentication and guards still apply.
+Mounted applications enforce their own authentication and guards, regardless of Origin policy.
+Enabling `"any"` or `"delegate"` changes the security boundary. Review cookie authentication before enabling either option.
 
 ## Authentication
 

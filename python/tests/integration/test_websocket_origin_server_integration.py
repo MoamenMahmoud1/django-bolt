@@ -84,3 +84,60 @@ def test_native_custom_and_any_on_real_server(make_server_project):
     assert " 101 " in public_missing
     assert " 403 " in default_reject
     assert " 101 " in default_allowed
+
+
+@pytest.mark.parametrize("origin", [
+    "https://example.com:0", "https://example.com:65536", "https://example.com:",
+    "https://[not-ipv6]", "https://user@example.com", "https://example.com/path",
+])
+def test_any_rejects_malformed_origins_before_upgrade(make_server_project, origin):
+    project = make_server_project(api_module=app_module("websocket_origin"))
+    with project.start() as server:
+        status, body = attempt_ws_upgrade(
+            server.host, server.port, "/ws/public", headers={"Origin": origin}
+        )
+    assert " 403 " in status
+    assert body == REJECTED_BODY
+
+
+@pytest.mark.parametrize(("module", "path", "origin", "global_policy", "status_code"), [
+    ("websocket_origin", "/ws/echo", "https://allowed.example", "inherit", 403),
+    ("websocket_origin", "/ws/echo", "https://allowed.example", "allowlist", 403),
+    ("websocket_origin", "/ws/public", "https://allowed.example", "inherit", 403),
+    ("websocket_origin", "/ws/tenant", "https://tenant.example", "inherit", 403),
+    ("websocket_origin", "/custom/ws?approve", "https://allowed.example", "inherit", 403),
+    ("ws_asgi_mount", "/mounted/ws", "https://allowed.example", "inherit", 403),
+    ("ws_asgi_mount", "/restricted/ws", "https://restricted.example", "inherit", 403),
+    ("ws_asgi_mount", "/delegated/ws", "https://delegated.example", "inherit", 101),
+])
+def test_repeated_origins_follow_policy_on_real_server(make_server_project, module, path, origin, global_policy, status_code):
+    project = make_server_project(
+        api_module=app_module(module),
+        settings_extra=f'CORS_ALLOWED_ORIGINS = ["https://allowed.example"]\n'
+        f'BOLT_WEBSOCKET_ORIGIN_POLICY = "{global_policy}"\n'
+        'BOLT_WEBSOCKET_ALLOWED_ORIGINS = ["https://allowed.example"]',
+    )
+    with project.start() as server:
+        status, body = attempt_ws_upgrade(server.host, server.port, path, headers={
+            "Origin": origin, "origin": origin,
+        })
+    assert f" {status_code} " in status
+    if status_code == 403:
+        assert body == REJECTED_BODY
+
+
+@pytest.mark.parametrize("path", ["/ws/failing", "/custom/ws"])
+def test_custom_failures_and_timeouts_deny_real_handshakes(make_server_project, path):
+    project = make_server_project(api_module=app_module("websocket_origin"))
+    with project.start() as server:
+        accepted, _ = attempt_ws_upgrade(
+            server.host, server.port, f"{path}?approve", headers={"Origin": "https://allowed.example"}
+        )
+        assert " 101 " in accepted
+        for mode in ("exception", "nonbool", "timeout"):
+            status, body = attempt_ws_upgrade(
+                server.host, server.port, f"{path}?{mode}",
+                headers={"Origin": "https://allowed.example"}, timeout=8.0,
+            )
+            assert " 403 " in status
+            assert body == REJECTED_BODY

@@ -49,6 +49,12 @@ BOLT_WEBSOCKET_ALLOW_MISSING_ORIGIN = False
   signature is `(origin, context) -> bool`, where context has `path`,
   `query_string`, and `headers`. A timeout or invalid return fails closed.
 
+These options raise `ValueError` for invalid policy combinations or Origin entries.
+A non-boolean missing-Origin flag raises `TypeError`.
+They do not use the `ImproperlyConfigured` conversion described for other settings.
+Global `delegate` is invalid. Select it explicitly on each responsible mount.
+Custom validation has a five-second timeout and requires a boolean result.
+
 See [WebSocket Origin policy](../topics/websocket.md#origin-policy) for
 security considerations and per-route / per-mount examples.
 

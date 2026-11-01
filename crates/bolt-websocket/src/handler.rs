@@ -810,11 +810,17 @@ pub async fn handle_websocket_upgrade(
             origin_policy
         }
     };
-    let origin_allowed = origin::validate_mount_origin(
-        req.headers().get(ORIGIN),
-        state.global_cors_config.as_ref(),
-        selected_origin_policy,
-    );
+    let repeated_origin = req.headers().get_all(ORIGIN).nth(1).is_some();
+    let origin_allowed = (!repeated_origin
+        || matches!(
+            selected_origin_policy.as_ref(),
+            WebSocketOriginPolicy::Delegate
+        ))
+        && origin::validate_mount_origin(
+            req.headers().get(ORIGIN),
+            state.global_cors_config.as_ref(),
+            selected_origin_policy,
+        );
     if !origin_allowed {
         return Ok(HttpResponse::Forbidden()
             .content_type("application/json")
