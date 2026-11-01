@@ -456,17 +456,17 @@ pub fn register_test_routes(
     reason = "PyO3 wire format: Python passes each WebSocket route as one tuple"
 )]
 pub fn register_test_websocket_routes(
-    _py: Python<'_>,
+    py: Python<'_>,
     app_id: u64,
-    routes: Vec<(String, usize, Py<PyAny>, Option<Py<PyAny>>)>,
+    routes: Vec<(String, usize, Py<PyAny>, Option<Py<PyAny>>, Py<PyAny>)>,
 ) -> PyResult<()> {
     let entry = test_app(app_id)?;
 
     let mut app = entry.write();
 
     let mut ws_router = WebSocketRouter::new();
-    for (path, handler_id, handler, injector) in routes {
-        ws_router.register(&path, handler_id, handler, injector)?;
+    for (path, handler_id, handler, injector, origin_config) in routes {
+        ws_router.register(&path, handler_id, handler, injector, Some(origin_config.bind(py)), py)?;
     }
     app.websocket_router = Arc::new(ws_router);
     Ok(())
