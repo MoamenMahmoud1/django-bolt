@@ -807,13 +807,7 @@ pub async fn handle_websocket_upgrade(
     let origin_allowed = origin::validate_mount_origin(
         req.headers().get(ORIGIN), state.global_cors_config.as_ref(), selected_origin_policy,
     );
-    if !origin_allowed
-        || (matches!(selected_origin_policy.as_ref(), WebSocketOriginPolicy::Custom { .. })
-            && !check_custom_origin(
-                selected_origin_policy, req.headers().get(ORIGIN), req.path(),
-                req.query_string(), &headers,
-            ).await)
-    {
+    if !origin_allowed {
         return Ok(HttpResponse::Forbidden()
             .content_type("application/json")
             .body(r#"{"detail":"Origin not allowed"}"#));
@@ -863,6 +857,19 @@ pub async fn handle_websocket_upgrade(
                 return Ok(bolt_core::responses::error_403_denial(denial.as_deref()));
             }
         }
+    }
+
+    // Evaluate optional Python custom policy after native auth/guards but
+    // before HTTP 101. Denied unauthenticated calls do not run Python.
+    if matches!(selected_origin_policy.as_ref(), WebSocketOriginPolicy::Custom { .. })
+        && !check_custom_origin(
+            selected_origin_policy, req.headers().get(ORIGIN), req.path(),
+            req.query_string(), &headers,
+        ).await
+    {
+        return Ok(HttpResponse::Forbidden()
+            .content_type("application/json")
+            .body(r#"{"detail":"Origin not allowed"}"#));
     }
 
     // The slot counts this connection until the handshake fails or the actor stops.
