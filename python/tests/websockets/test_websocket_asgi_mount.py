@@ -167,6 +167,12 @@ async def test_mounted_asgi_app_can_reject_origins_it_does_not_trust():
             pass
     assert rejected.value.status_code == 403
 
+    # The delegated app also refuses a client which omits Origin entirely.
+    with pytest.raises(HandshakeRejected) as missing:
+        async with WebSocketTestClient(api, "/protected/ws", headers={}, **options):
+            pass
+    assert missing.value.status_code == 403
+
 
 def test_mount_origin_policy_validation():
     async def app(scope, receive, send):
