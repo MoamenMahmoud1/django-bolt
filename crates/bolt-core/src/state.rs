@@ -2,6 +2,7 @@ use actix_web::http::header::HeaderValue;
 use ahash::AHashMap;
 use once_cell::sync::OnceCell;
 use pyo3::prelude::*;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -14,6 +15,17 @@ use crate::router::Router;
 use crate::streaming::StreamConfig;
 pub use bolt_loop::TASK_LOCALS;
 
+/// Per-mount WebSocket Origin policy, resolved once at registration.
+#[derive(Debug)]
+pub enum WebSocketOriginPolicy {
+    /// Preserve Bolt's global Origin policy (the backward-compatible default).
+    Inherit,
+    /// The mounted ASGI app takes responsibility for validating Origin.
+    Delegate,
+    /// Exact permitted browser origins. A missing Origin is rejected.
+    Allowlist(HashSet<String>),
+}
+
 /// ASGI sub-application mount configuration.
 ///
 /// `prefix` is normalized and static (e.g. "/", "/admin", "/django/accounts").
@@ -24,6 +36,7 @@ pub struct AsgiMount {
     /// False when the app serves HTTP only, such as Django's `ASGIHandler`.
     /// Read once at registration.
     pub websocket: bool,
+    pub websocket_origin_policy: Arc<WebSocketOriginPolicy>,
 }
 
 impl AsgiMount {
