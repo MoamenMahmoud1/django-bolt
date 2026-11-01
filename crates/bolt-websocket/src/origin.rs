@@ -78,9 +78,11 @@ fn is_origin_allowed(origin: &str, cors_config: &CorsConfig) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_origin_allowed, validate_origin};
+    use super::{is_origin_allowed, validate_mount_origin, validate_origin};
     use actix_web::http::header::HeaderValue;
     use bolt_core::metadata::CorsConfig;
+    use bolt_core::state::WebSocketOriginPolicy;
+    use std::collections::HashSet;
 
     fn cors(origins: &[&str], regexes: &[&str], allow_all: bool) -> CorsConfig {
         CorsConfig::from_django_settings(
@@ -145,6 +147,52 @@ mod tests {
     fn is_origin_allowed_allows_every_origin_with_allow_all() {
         let config = cors(&[], &[], true);
         assert!(is_origin_allowed("https://any.example", &config));
+    }
+
+    #[test]
+    fn mount_origin_inherit_keeps_the_global_security_policy() {
+        let configured = cors(&["https://allowed.example"], &[], false);
+        let policy = WebSocketOriginPolicy::Inherit;
+        assert!(validate_mount_origin(
+            Some(&origin("https://allowed.example")), Some(&configured), &policy
+        ));
+        assert!(!validate_mount_origin(
+            Some(&origin("https://evil.example")), Some(&configured), &policy
+        ));
+        assert!(validate_mount_origin(None, Some(&configured), &policy));
+        assert!(!validate_mount_origin(
+            Some(&origin("https://allowed.example")), None, &policy
+        ));
+    }
+
+    #[test]
+    fn mount_origin_explicit_allowlist_requires_exact_origin() {
+        let origins = HashSet::from(["https://mount.example".to_string()]);
+        let policy = WebSocketOriginPolicy::Allowlist(origins);
+        let global = cors(&["https://other.example"], &[], false);
+        assert!(validate_mount_origin(
+            Some(&origin("https://mount.example")), Some(&global), &policy
+        ));
+        for rejected in [
+            "http://mount.example",
+            "https://other.example",
+            "https://mount.example.evil",
+            "null",
+        ] {
+            assert!(!validate_mount_origin(
+                Some(&origin(rejected)), Some(&global), &policy
+            ));
+        }
+        assert!(!validate_mount_origin(None, Some(&global), &policy));
+    }
+
+    #[test]
+    fn mount_origin_delegate_is_an_explicit_opt_out() {
+        let policy = WebSocketOriginPolicy::Delegate;
+        assert!(validate_mount_origin(
+            Some(&origin("https://arbitrary.example")), None, &policy
+        ));
+        assert!(validate_mount_origin(None, None, &policy));
     }
 
     #[test]
