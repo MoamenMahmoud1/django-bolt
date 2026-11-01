@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import inspect
 import json
 import platform
 import statistics
@@ -104,8 +105,6 @@ def main():
         measure("/mounted/ws", "inherit", args.count, args.repeats),
     ]
     # The old baseline's API does not have the new mount options.
-    import inspect
-
     if "websocket_origin_policy" in inspect.signature(BoltAPI.mount_asgi).parameters:
         rows.extend(
             [
