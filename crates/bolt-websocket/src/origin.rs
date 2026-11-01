@@ -80,7 +80,7 @@ fn valid_web_origin(value: &str) -> bool {
     if !matches!(uri.scheme_str(), Some("http" | "https")) { return false; }
     let Some(authority) = uri.authority() else { return false };
     if authority.as_str().contains('@') || authority.host().is_empty() { return false; }
-    uri.path_and_query().is_none()
+    format!("{}://{}", uri.scheme_str().unwrap_or_default(), authority) == value
 }
 
 /// Check if an origin is allowed by the CORS configuration.
