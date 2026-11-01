@@ -56,3 +56,31 @@ def test_no_cors_settings_reject_every_cross_origin_handshake(make_server_projec
     assert " 403 " in cross_origin[0]
     assert cross_origin[1] == REJECTED_BODY
     assert " 101 " in no_origin[0]
+
+
+def test_native_custom_and_any_on_real_server(make_server_project):
+    project = make_server_project(
+        api_module=app_module("websocket_origin"),
+        settings_extra='BOLT_WEBSOCKET_ORIGIN_POLICY = "allowlist"\n'
+        'BOLT_WEBSOCKET_ALLOWED_ORIGINS = ["https://global.example"]',
+    )
+    with project.start() as server:
+        def check(path, origin):
+            headers = {} if origin is None else {"Origin": origin}
+            return attempt_ws_upgrade(server.host, server.port, path, headers=headers)
+
+        trusted, _ = check("/ws/tenant", "https://tenant.example")
+        evil, evil_body = check("/ws/tenant", "https://evil.example")
+        missing, missing_body = check("/ws/tenant", None)
+        public, _ = check("/ws/public", "https://random.example")
+        public_missing, _ = check("/ws/public", None)
+        default_reject, _ = check("/ws/echo", "https://random.example")
+        default_allowed, _ = check("/ws/echo", "https://global.example")
+
+    assert " 101 " in trusted[0]
+    assert " 403 " in evil[0] and evil_body == REJECTED_BODY
+    assert " 403 " in missing[0] and missing_body == REJECTED_BODY
+    assert " 101 " in public[0]
+    assert " 101 " in public_missing[0]
+    assert " 403 " in default_reject[0]
+    assert " 101 " in default_allowed[0]
