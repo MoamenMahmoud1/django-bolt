@@ -183,7 +183,7 @@ def test_mount_origin_policy_validation():
         return None
 
     for policy in ("unknown", "INHERIT", ""):
-        with pytest.raises(ValueError, match="websocket_origin_policy"):
+        with pytest.raises(ValueError, match="Origin policy"):
             BoltAPI().mount_asgi("/bad", app, websocket_origin_policy=policy)
 
     with pytest.raises(ValueError, match="nonempty list"):
