@@ -190,6 +190,46 @@ def test_mount_origin_policy_validation():
 
 
 @pytest.mark.asyncio
+async def test_same_asgi_callable_can_have_independent_origin_policies():
+    """Per-mount options must not mutate or leak onto the ASGI callable."""
+    api = BoltAPI()
+    api.mount_asgi(
+        "/team-a", echo_app, websocket_origin_policy="allowlist",
+        websocket_allowed_origins=["https://a.example"],
+    )
+    api.mount_asgi(
+        "/team-b", echo_app, websocket_origin_policy="allowlist",
+        websocket_allowed_origins=["https://b.example"],
+    )
+    options = {"read_django_settings": False}
+
+    async with WebSocketTestClient(api, "/team-a/ws", headers={"Origin": "https://a.example"}, **options) as ws:
+        await ws.send_text("hello")
+        assert await ws.receive_text() == "echo:hello"
+
+    with pytest.raises(PermissionError, match="Origin not allowed"):
+        async with WebSocketTestClient(api, "/team-b/ws", headers={"Origin": "https://a.example"}, **options):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_mount_django_custom_asgi_can_select_origin_policy():
+    api = BoltAPI()
+    api.mount_django(
+        "/custom", echo_app, websocket_origin_policy="allowlist",
+        websocket_allowed_origins=["https://custom.example"],
+    )
+    options = {"read_django_settings": False}
+    async with WebSocketTestClient(api, "/custom/ws", headers={"Origin": "https://custom.example"}, **options) as ws:
+        await ws.send_text("hello")
+        assert await ws.receive_text() == "echo:hello"
+
+    with pytest.raises(PermissionError, match="Origin not allowed"):
+        async with WebSocketTestClient(api, "/custom/ws", headers={"Origin": "https://evil.example"}, **options):
+            pass
+
+
+@pytest.mark.asyncio
 async def test_mounted_app_echoes_bytes(api):
     async with WebSocketTestClient(api, "/mounted/ws") as ws:
         await ws.send_bytes(b"\x00\x01")
