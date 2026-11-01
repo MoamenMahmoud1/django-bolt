@@ -261,29 +261,26 @@ Mount another BoltAPI under a prefix.
 api.mount("/v1", v1_api)
 ```
 
-#### api.mount_asgi(path, app, *, websocket_origin_policy="inherit", websocket_allowed_origins=None)
+#### api.mount_asgi(path, app, *, websocket_origin_policy=None, websocket_allowed_origins=None, websocket_allow_missing_origin=None, websocket_origin_validator=None)
 
 Mount an HTTP or WebSocket ASGI application under a static prefix.
+Unspecified Origin settings inherit the `BOLT_WEBSOCKET_*` settings (or the
+legacy CORS Origin policy if no new settings exist). Available policies are
+`"inherit"`, `"allowlist"`, `"any"`, `"custom"` and `"delegate"`.
+`"delegate"` transfers Origin protection to the mounted application;
+it must validate Origin itself. `"custom"` requires a sync or async Python
+validator returning bool. See [ASGI Mounts](../topics/asgi-mounts.md).
 
-The WebSocket Origin policy defaults to `"inherit"` (Bolt's global allowlist).
-Use `"allowlist"` with a nonempty list of exact `http://` or `https://`
-origins to restrict one mounted app (including rejecting a missing Origin),
-or `"delegate"` only when the ASGI app validates Origin itself.
+Mounted ASGI apps still own HTTP authentication and CORS behavior; the
+selected WebSocket Origin policy applies only at the handshake.
 
-See [ASGI Mounts](../topics/asgi-mounts.md) for full behavior, examples, and constraints.
+#### api.mount_django(path, app=None, *, clear_root_path=False, websocket_origin_policy=None, websocket_allowed_origins=None, websocket_allow_missing_origin=None, websocket_origin_validator=None)
 
-Mounted ASGI apps are outside Bolt's route middleware/auth and HTTP CORS
-flow; the WebSocket handshake uses the selected Origin policy. HTTP mounts
-currently use a buffered response bridge (not true streaming passthrough).
-
-#### api.mount_django(path, app=None, *, clear_root_path=False, websocket_origin_policy="inherit", websocket_allowed_origins=None)
-
-Convenience wrapper for mounting Django's ASGI app (or a custom ASGI app) under a prefix. It supports the same optional WebSocket Origin policy as `mount_asgi` for custom ASGI apps.
-
-See [ASGI Mounts](../topics/asgi-mounts.md) for usage examples and dispatch/conflict rules.
-
-`mount_django()` inherits the same mount boundary and buffered-bridge behavior as `mount_asgi()`.
-Use `clear_root_path=True` when Django URL patterns already include the mount prefix.
+Convenience wrapper for mounting Django's ASGI app (or a custom ASGI app) under
+a prefix. It accepts the same optional WebSocket Origin policy settings as
+`mount_asgi`. See [ASGI Mounts](../topics/asgi-mounts.md).
+Use `clear_root_path=True` when Django URL patterns already include the
+mount prefix.
 
 ## Dependency injection
 
