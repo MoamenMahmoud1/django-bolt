@@ -1066,6 +1066,9 @@ class BoltAPI:
         """Internal decorator for WebSocket routes."""
 
         def decorator(fn: Callable) -> Callable:
+            local_origin = OriginOptions(origin_policy, allowed_origins, allow_missing_origin, origin_validator)
+            if local_origin != OriginOptions():
+                resolve_origin_options(local_origin)
             # Ensure handler is async
             if not inspect.iscoroutinefunction(fn):
                 raise TypeError(f"WebSocket handler '{fn.__name__}' must be an async function")
@@ -3713,6 +3716,9 @@ class BoltAPI:
             websocket_origin_policy, websocket_allowed_origins,
             websocket_allow_missing_origin, websocket_origin_validator,
         )
+        if options != OriginOptions():
+            resolve_origin_options(options, asgi=True)
+
         mount_path = _normalize_mount_prefix(path)
         if self.prefix:
             if mount_path == "/":
