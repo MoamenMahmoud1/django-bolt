@@ -184,6 +184,11 @@ mod tests {
             ));
         }
         assert!(!validate_mount_origin(None, Some(&global), &policy));
+        // An explicit mount allowlist still wins over globally permissive CORS.
+        let globally_open = cors(&[], &[], true);
+        assert!(!validate_mount_origin(
+            Some(&origin("https://evil.example")), Some(&globally_open), &policy
+        ));
     }
 
     #[test]
