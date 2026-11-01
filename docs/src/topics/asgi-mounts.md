@@ -158,13 +158,41 @@ ASGI mounts run outside Bolt's route middleware pipeline.
 
 That means Bolt-level middleware features (for example rate limits, Bolt auth guards, and Bolt CORS behavior) do not apply to mounted ASGI apps. Mounted Django apps should rely on Django middleware/settings for those concerns.
 
-For WebSocket handshakes, Bolt checks the global CORS Origin allowlist on its own
-`@api.websocket` routes, but **does not apply that check to a mounted ASGI
-application**. The mounted application must enforce its own WebSocket Origin
-policy, for example using Django Channels' `OriginValidator` or
-`AllowedHostsOriginValidator`. This is especially important when the
-connection authenticates with browser cookies: mounting an ASGI app does not
-make Bolt's `CORS_ALLOWED_ORIGINS` a security boundary for that app.
+WebSocket handshakes have a secure, backward-compatible Origin policy by
+default: a mounted ASGI app **inherits** Bolt's global
+`CORS_ALLOWED_ORIGINS` / `CORS_ALLOWED_ORIGIN_REGEXES` policy.
+HTTP requests still follow the mounted app's own middleware.
+
+For a WebSocket app with its own security policy, opt in explicitly:
+
+```python
+# Default: inherit Bolt's global WebSocket Origin allowlist.
+api.mount_asgi("/legacy", legacy_app)
+
+# Separate strict allowlist. Origin is required and must match exactly.
+api.mount_asgi(
+    "/support",
+    support_app,
+    websocket_origin_policy="allowlist",
+    websocket_allowed_origins=["https://support.example.com"],
+)
+
+# Only for an ASGI app with its own Origin protection.
+from channels.security.websocket import OriginValidator
+
+api.mount_asgi(
+    "/channels",
+    OriginValidator(channels_app, ["https://chat.example.com"]),
+    websocket_origin_policy="delegate",
+)
+```
+
+`delegate` intentionally bypasses Bolt's Origin check on the mounted app.
+**Do not use it without an ASGI Origin validator**, especially when browser
+cookies authenticate the connection. It does not disable the app's own auth
+and authorization. Missing Origin is rejected in `allowlist` mode;
+`inherit` retains Bolt's existing behavior for non-browser clients.
+The selected policy is compiled once when the mount is registered.
 
 ## Timeouts and body limits
 
