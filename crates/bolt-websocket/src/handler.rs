@@ -635,6 +635,7 @@ pub enum WsTarget {
         handler_id: usize,
         path_params: AHashMap<String, String>,
         injector: Option<Py<PyAny>>,
+        origin_policy: Arc<WebSocketOriginPolicy>,
     },
     /// An ASGI application registered with `api.mount_asgi`. Receives the
     /// scope, receive, and send triple directly.
@@ -656,6 +657,47 @@ async fn token_revoked(check: &Py<PyAny>, auth_ctx: &AuthContext) -> PyResult<bo
     })?;
     let revoked = future.await?;
     Python::attach(|py| revoked.extract::<bool>(py))
+}
+
+/// Run the optional Python validator before upgrading. Errors and timeouts
+/// fail closed. Other policies remain completely on the Rust fast path.
+async fn check_custom_origin(
+    policy: &WebSocketOriginPolicy,
+    origin: Option<&actix_web::http::header::HeaderValue>,
+    path: &str,
+    query: &str,
+    headers: &AHashMap<String, String>,
+) -> bool {
+    let WebSocketOriginPolicy::Custom { validator, .. } = policy else { return true };
+    let origin = origin.and_then(|v| v.to_str().ok()).map(str::to_owned);
+    let future = Python::attach(|py| -> PyResult<_> {
+        let context = PyDict::new(py);
+        context.set_item("path", path)?;
+        context.set_item("query_string", query)?;
+        let h = PyDict::new(py);
+        for (k, v) in headers { h.set_item(k, v)?; }
+        context.set_item("headers", h)?;
+        let coro = validator.call1(py, (origin, context))?;
+        let locals = bolt_loop::worker_task_locals(py)?;
+        pyo3_async_runtimes::into_future_with_locals(&locals, coro.bind(py).clone())
+    });
+    match future {
+        Ok(future) => match tokio::time::timeout(std::time::Duration::from_secs(5), future).await {
+            Ok(Ok(value)) => Python::attach(|py| value.extract::<bool>(py).unwrap_or(false)),
+            Ok(Err(err)) => {
+                eprintln!("[django-bolt] Custom WebSocket Origin validator failed: {err}");
+                false
+            }
+            Err(_) => {
+                eprintln!("[django-bolt] Custom WebSocket Origin validator timed out");
+                false
+            }
+        },
+        Err(err) => {
+            eprintln!("[django-bolt] Custom WebSocket Origin validator failed: {err}");
+            false
+        }
+    }
 }
 
 /// HTTP handler for WebSocket upgrade with full Python integration
@@ -759,17 +801,19 @@ pub async fn handle_websocket_upgrade(
     // Native routes and default mounts preserve Bolt's global Origin policy.
     // An ASGI mount may explicitly choose a dedicated allowlist or delegate
     // validation to its own middleware. No Python runs for this check.
-    let origin_allowed = match &target {
-        WsTarget::Route { .. } => {
-            origin::validate_origin(req.headers().get(ORIGIN), state.global_cors_config.as_ref())
-        }
-        WsTarget::AsgiMount { origin_policy, .. } => origin::validate_mount_origin(
-            req.headers().get(ORIGIN),
-            state.global_cors_config.as_ref(),
-            origin_policy,
-        ),
+    let selected_origin_policy = match &target {
+        WsTarget::Route { origin_policy, .. } | WsTarget::AsgiMount { origin_policy, .. } => origin_policy,
     };
-    if !origin_allowed {
+    let origin_allowed = origin::validate_mount_origin(
+        req.headers().get(ORIGIN), state.global_cors_config.as_ref(), selected_origin_policy,
+    );
+    if !origin_allowed
+        || (matches!(selected_origin_policy.as_ref(), WebSocketOriginPolicy::Custom { .. })
+            && !check_custom_origin(
+                selected_origin_policy, req.headers().get(ORIGIN), req.path(),
+                req.query_string(), &headers,
+            ).await)
+    {
         return Ok(HttpResponse::Forbidden()
             .content_type("application/json")
             .body(r#"{"detail":"Origin not allowed"}"#));
