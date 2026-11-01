@@ -64,6 +64,22 @@ def test_default_mount_allows_globally_configured_origin(make_server_project):
     assert " 101 " in status, status
 
 
+def test_strict_mount_allowlist_overrides_global_allow_all(make_server_project):
+    """Dedicated ASGI security must not inherit a globally open CORS policy."""
+    project = make_server_project(
+        api_module=app_module("ws_asgi_mount"),
+        settings_extra="CORS_ALLOW_ALL_ORIGINS = True",
+    )
+    with project.start() as server:
+        headers = {"Origin": "https://other.example"}
+        status, body = attempt_ws_upgrade(server.host, server.port, "/restricted/ws", headers=headers)
+        default_status, _ = attempt_ws_upgrade(server.host, server.port, "/mounted/ws", headers=headers)
+
+    assert " 403 " in status, status
+    assert body == '{"detail":"Origin not allowed"}'
+    assert " 101 " in default_status, default_status
+
+
 def test_asgi_mount_explicit_allowlist_and_delegate(make_server_project):
     project = _make_project(make_server_project)
     with project.start() as server:
