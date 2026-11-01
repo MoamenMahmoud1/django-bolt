@@ -159,11 +159,15 @@ async def test_mounted_asgi_app_can_reject_origins_it_does_not_trust():
         "cors_allowed_origins": ["https://bolt-policy.example"],
         "read_django_settings": False,
     }
-    async with WebSocketTestClient(api, "/protected/ws", headers={"Origin": "https://trusted.example"}, **options) as ws:
+    async with WebSocketTestClient(
+        api, "/protected/ws", headers={"Origin": "https://trusted.example"}, **options
+    ) as ws:
         assert await ws.receive_text() == "trusted"
 
     with pytest.raises(HandshakeRejected) as rejected:
-        async with WebSocketTestClient(api, "/protected/ws", headers={"Origin": "https://untrusted.example"}, **options):
+        async with WebSocketTestClient(
+            api, "/protected/ws", headers={"Origin": "https://untrusted.example"}, **options
+        ):
             pass
     assert rejected.value.status_code == 403
 
