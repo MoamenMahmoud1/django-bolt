@@ -5,6 +5,7 @@ Python validators are opt-in and run only before the opening handshake.
 """
 from __future__ import annotations
 
+import asyncio
 import inspect
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -63,6 +64,8 @@ def resolve_origin_options(options: OriginOptions | None = None, *, read_setting
     local = options or OriginOptions()
     global_policy = _settings_value("BOLT_WEBSOCKET_ORIGIN_POLICY", "inherit", read_settings)
     policy = local.policy if local.policy is not None else global_policy
+    if local.policy is None and policy == "delegate":
+        raise ValueError("delegate must be selected explicitly on an ASGI mount")
     valid = ("inherit", "allowlist", "any", "custom", "delegate") if asgi else ("inherit", "allowlist", "any", "custom")
     if policy not in valid:
         raise ValueError(f"WebSocket Origin policy must be one of {valid}, got {policy!r}")
@@ -95,9 +98,14 @@ def resolve_origin_options(options: OriginOptions | None = None, *, read_setting
         func = validator
 
         async def checked(origin: str | None, context: dict[str, Any]) -> bool:
-            result = func(origin, context)
-            if inspect.isawaitable(result):
-                result = await result
+            if inspect.iscoroutinefunction(func):
+                result = await func(origin, context)
+            else:
+                # A slow synchronous validator must not block the worker's
+                # asyncio loop. Only custom policies pay this thread cost.
+                result = await asyncio.to_thread(func, origin, context)
+                if inspect.isawaitable(result):
+                    result = await result
             if type(result) is not bool:
                 raise TypeError("WebSocket origin_validator must return bool")
             return result
