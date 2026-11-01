@@ -261,13 +261,20 @@ Mount another BoltAPI under a prefix.
 api.mount("/v1", v1_api)
 ```
 
-#### api.mount_asgi(path, app)
+#### api.mount_asgi(path, app, *, websocket_origin_policy="inherit", websocket_allowed_origins=None)
 
-Mount an HTTP ASGI application under a static prefix.
+Mount an HTTP or WebSocket ASGI application under a static prefix.
+
+The WebSocket Origin policy defaults to `"inherit"` (Bolt's global allowlist).
+Use `"allowlist"` with a nonempty list of exact `http://` or `https://`
+origins to restrict one mounted app (including rejecting a missing Origin),
+or `"delegate"` only when the ASGI app validates Origin itself.
 
 See [ASGI Mounts](../topics/asgi-mounts.md) for full behavior, examples, and constraints.
 
-Mounted ASGI apps are outside Bolt middleware/auth/CORS flow and currently use a buffered response bridge (not true streaming passthrough).
+Mounted ASGI apps are outside Bolt's route middleware/auth and HTTP CORS
+flow; the WebSocket handshake uses the selected Origin policy. HTTP mounts
+currently use a buffered response bridge (not true streaming passthrough).
 
 #### api.mount_django(path, app=None, *, clear_root_path=False)
 
