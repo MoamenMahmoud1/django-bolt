@@ -49,12 +49,38 @@ pub fn validate_mount_origin(
     policy: &WebSocketOriginPolicy,
 ) -> bool {
     match policy {
-        WebSocketOriginPolicy::Inherit => validate_origin(origin, cors_config),
+        WebSocketOriginPolicy::Inherit { allow_missing } => {
+            if origin.is_none() && !allow_missing { return false; }
+            validate_origin(origin, cors_config)
+        }
         WebSocketOriginPolicy::Delegate => true,
-        WebSocketOriginPolicy::Allowlist(allowed) => origin
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| allowed.contains(value)),
+        WebSocketOriginPolicy::Allowlist { origins, allow_missing } => match origin {
+            None => *allow_missing,
+            Some(value) => value.to_str().ok().is_some_and(|v| origins.contains(v)),
+        },
+        WebSocketOriginPolicy::Any { allow_missing } => match origin {
+            None => *allow_missing,
+            Some(value) => value.to_str().ok().is_some_and(valid_web_origin),
+        },
+        // The callback is evaluated separately before the HTTP 101.
+        WebSocketOriginPolicy::Custom { allow_missing, .. } => match origin {
+            None => *allow_missing,
+            Some(value) => value.to_str().is_ok(),
+        },
     }
+}
+
+/// Only a syntactically valid HTTP(S) web Origin is permitted by `any`.
+/// This does not authenticate a client and deliberately excludes "null".
+fn valid_web_origin(value: &str) -> bool {
+    if value.is_empty() || value == "null" || value.bytes().any(|b| b.is_ascii_whitespace()) {
+        return false;
+    }
+    let Ok(uri) = value.parse::<actix_web::http::Uri>() else { return false };
+    if !matches!(uri.scheme_str(), Some("http" | "https")) { return false; }
+    let Some(authority) = uri.authority() else { return false };
+    if authority.as_str().contains('@') || authority.host().is_empty() { return false; }
+    uri.path_and_query().is_none()
 }
 
 /// Check if an origin is allowed by the CORS configuration.
@@ -152,7 +178,7 @@ mod tests {
     #[test]
     fn mount_origin_inherit_keeps_the_global_security_policy() {
         let configured = cors(&["https://allowed.example"], &[], false);
-        let policy = WebSocketOriginPolicy::Inherit;
+        let policy = WebSocketOriginPolicy::Inherit { allow_missing: true };
         assert!(validate_mount_origin(
             Some(&origin("https://allowed.example")), Some(&configured), &policy
         ));
@@ -168,7 +194,7 @@ mod tests {
     #[test]
     fn mount_origin_explicit_allowlist_requires_exact_origin() {
         let origins = HashSet::from(["https://mount.example".to_string()]);
-        let policy = WebSocketOriginPolicy::Allowlist(origins);
+        let policy = WebSocketOriginPolicy::Allowlist { origins, allow_missing: false };
         let global = cors(&["https://other.example"], &[], false);
         assert!(validate_mount_origin(
             Some(&origin("https://mount.example")), Some(&global), &policy
@@ -189,6 +215,15 @@ mod tests {
         assert!(!validate_mount_origin(
             Some(&origin("https://evil.example")), Some(&globally_open), &policy
         ));
+    }
+
+    #[test]
+    fn any_origin_is_explicit_and_rejects_null_or_missing() {
+        let policy = WebSocketOriginPolicy::Any { allow_missing: false };
+        assert!(validate_mount_origin(Some(&origin("https://other.example")), None, &policy));
+        assert!(!validate_mount_origin(Some(&origin("null")), None, &policy));
+        assert!(!validate_mount_origin(Some(&origin("https://other.example/path")), None, &policy));
+        assert!(!validate_mount_origin(None, None, &policy));
     }
 
     #[test]
