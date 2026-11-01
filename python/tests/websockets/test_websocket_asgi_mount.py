@@ -104,6 +104,25 @@ async def test_mounted_app_echoes_text(api):
         assert await ws.receive_text() == "echo:hello"
 
 
+
+@pytest.mark.asyncio
+async def test_mounted_asgi_app_owns_origin_policy(api):
+    """A mounted ASGI app is not subject to Bolt's global CORS allowlist."""
+    options = {
+        "headers": {"Origin": "https://different.example"},
+        "cors_allowed_origins": ["https://allowed-by-bolt.example"],
+        "read_django_settings": False,
+    }
+
+    async with WebSocketTestClient(api, "/mounted/ws", **options) as ws:
+        await ws.send_text("hello")
+        assert await ws.receive_text() == "echo:hello"
+
+    with pytest.raises(PermissionError, match="Origin not allowed"):
+        async with WebSocketTestClient(api, "/ws/direct", **options):
+            pass
+
+
 @pytest.mark.asyncio
 async def test_mounted_app_echoes_bytes(api):
     async with WebSocketTestClient(api, "/mounted/ws") as ws:
