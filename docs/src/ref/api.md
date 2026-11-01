@@ -276,9 +276,9 @@ Mounted ASGI apps are outside Bolt's route middleware/auth and HTTP CORS
 flow; the WebSocket handshake uses the selected Origin policy. HTTP mounts
 currently use a buffered response bridge (not true streaming passthrough).
 
-#### api.mount_django(path, app=None, *, clear_root_path=False)
+#### api.mount_django(path, app=None, *, clear_root_path=False, websocket_origin_policy="inherit", websocket_allowed_origins=None)
 
-Convenience wrapper for mounting Django's ASGI app (or a custom ASGI app) under a prefix.
+Convenience wrapper for mounting Django's ASGI app (or a custom ASGI app) under a prefix. It supports the same optional WebSocket Origin policy as `mount_asgi` for custom ASGI apps.
 
 See [ASGI Mounts](../topics/asgi-mounts.md) for usage examples and dispatch/conflict rules.
 
