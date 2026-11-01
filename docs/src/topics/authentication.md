@@ -522,19 +522,33 @@ you need and pass them with `claims=`.
 ### Logging a user out everywhere
 
 Revocation stores keep a version number for each user, and every token
-pair records the version it was minted under (the `ver` claim). Calling
-`bump_user_version()` increments the stored version; refresh tokens
-minted before the bump fail rotation from then on:
+pair records the version it was minted under (the `ver` claim). A global
+logout must atomically compare the caller's version with the stored version
+before incrementing it, so a stale request cannot invalidate a newer login:
 
 ```python
+from django_bolt.exceptions import HTTPException
+
 @api.post("/auth/logout-all", auth=[jwt_auth], guards=[IsAuthenticated()])
 async def logout_all(request):
-    await store.bump_user_version(request["context"]["user_id"])
+    expected_version = request["context"]["auth_claims"].get("ver")
+    if type(expected_version) is not int:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    try:
+        updated = await store.bump_user_version_if_current(
+            request["context"]["user_id"], expected_version
+        )
+    except (AttributeError, NotImplementedError) as exc:
+        raise HTTPException(status_code=503, detail="Atomic global logout unavailable") from exc
+    if not updated:
+        raise HTTPException(status_code=401, detail="Invalid token")
     return {"status": "logged out everywhere"}
 ```
 
-This is a single O(1) write; you do not need to find and revoke each
-outstanding token.
+This is an O(1) atomic operation; you do not need to find and revoke each
+outstanding token. For a cookie-based refresh-token flow, prefer the
+ready-made `JWTAuthViews` above, which also checks JTI and family revocation.
 
 !!! note "Access tokens are stateless by default"
 

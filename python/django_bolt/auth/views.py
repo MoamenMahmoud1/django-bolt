@@ -84,7 +84,7 @@ class JWTAuthViews:
             raise HTTPException(status_code=401, detail="Invalid token")
 
         fam = claims.get("fam")
-        if fam is not None and (not isinstance(fam, str) or not fam):
+        if not isinstance(fam, str) or not fam:
             raise HTTPException(status_code=401, detail="Invalid token")
 
         try:

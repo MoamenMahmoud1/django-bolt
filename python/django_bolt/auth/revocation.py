@@ -325,7 +325,9 @@ class DjangoCacheRevocation(RevocationStore):
         reused. Preserve the backend's configured serializer and cache key.
         """
         cache = self.cache
-        if isinstance(cache, RedisCache):
+        # A custom RedisCache may override get() with extra revocation policy.
+        # Bypass replica routing only for the unmodified built-in backend.
+        if cache.__class__ is RedisCache:
             cache_key = cache.make_and_validate_key(key)
             backend = cache._cache
             raw = backend.get_client(cache_key, write=True).get(cache_key)
@@ -340,7 +342,9 @@ class DjangoCacheRevocation(RevocationStore):
         optional store capability, not a new RevocationStore requirement.
         """
         cache = self.cache
-        if not isinstance(cache, RedisCache):
+        # Custom RedisCache subclasses may override get() with security policy;
+        # fall back to the public checks rather than bypassing those readers.
+        if cache.__class__ is not RedisCache:
             return None
 
         # A custom store may override individual revocation/version checks.

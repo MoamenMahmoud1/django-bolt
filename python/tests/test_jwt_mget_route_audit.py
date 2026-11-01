@@ -11,6 +11,7 @@ import os
 import uuid
 
 import pytest
+from django.core.cache.backends.redis import RedisCache
 from django.test import override_settings
 
 from django_bolt.auth import DjangoCacheRevocation, JWTAuthViews, create_token_pair
@@ -116,6 +117,7 @@ def test_mget_failure_never_performs_logout_mutation(monkeypatch, endpoint):
         def failing_factory(*args, **kwargs):
             client = get_client(*args, **kwargs)
             if kwargs.get("write") is True:
+
                 def unavailable(*_args, **_kwargs):
                     raise RuntimeError("simulated security read outage")
 
@@ -182,3 +184,82 @@ def test_subclass_security_overrides_not_skipped_by_mget(store_class, endpoint):
             assert client.get(ver_key) is None, "Invalid logout-all must not bump the user version"
         finally:
             client.delete(fam_key, ver_key, jti_key)
+
+
+# Regression: the shared refresh validator must reject family-less tokens
+# before any Redis/cache state read or logout mutation.
+@pytest.mark.parametrize("endpoint", ["/auth/logout", "/auth/logout-all"])
+@pytest.mark.parametrize("family", [None, "", 123, []], ids=["missing", "empty", "integer", "list"])
+def test_logout_rejects_invalid_family_before_store_access(monkeypatch, endpoint, family):
+    with override_settings(CACHES={"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}):
+        store = DjangoCacheRevocation(key_prefix=f"mget-family:{uuid.uuid4().hex}:")
+        routes = _Routes()
+        JWTAuthViews(store=store, secret=SECRET).register(routes)
+        pair = create_token_pair("familyless-user", secret=SECRET)
+        claims = dict(pair.refresh_claims)
+        if family is None:
+            claims.pop("fam")
+        else:
+            claims["fam"] = family
+
+        async def must_not_access_store(*_args, **_kwargs):
+            raise AssertionError("Invalid family must be rejected before state access")
+
+        monkeypatch.setattr(store, "get_refresh_state", must_not_access_store)
+        monkeypatch.setattr(store, "revoke_family", must_not_access_store)
+        monkeypatch.setattr(store, "bump_user_version_if_current", must_not_access_store)
+        request = {"context": {"auth_claims": claims, "user_id": "familyless-user"}}
+        with pytest.raises(HTTPException) as error:
+            asyncio.run(routes.handlers[endpoint](request))
+        assert error.value.status_code == 401
+        assert asyncio.run(store.get_user_version("familyless-user")) == 0
+
+
+# Regression: a custom Django RedisCache.get can perform extra security checks.
+# The built-in RedisCache must still use MGET on the write primary.
+class _CustomPolicyRedisCache(RedisCache):
+    def get(self, key, default=None, version=None):
+        if ":fam:" in key:
+            return "revoked-by-custom-cache-policy"
+        return super().get(key, default=default, version=version)
+
+
+@pytest.mark.parametrize("endpoint", ["/auth/logout", "/auth/logout-all"])
+def test_custom_rediscache_get_policy_is_not_bypassed(endpoint):
+    pytest.importorskip("redis")
+    settings = _settings()
+    settings["default"]["BACKEND"] = f"{__name__}._CustomPolicyRedisCache"
+
+    with override_settings(CACHES=settings):
+        store = DjangoCacheRevocation(key_prefix=f"mget-custom-get:{uuid.uuid4().hex}:")
+        cache = store.cache
+        backend = cache._cache
+        client = backend.get_client(write=True)
+        try:
+            client.ping()
+        except Exception as exc:
+            pytest.skip(f"Test Redis unavailable: {exc}")
+
+        user_id = "custom-get-policy-user"
+        pair = create_token_pair(user_id, secret=SECRET)
+        claims = pair.refresh_claims
+        prefix = store.key_prefix
+        fam_key = cache.make_and_validate_key(f"{prefix}fam:{claims['fam']}")
+        ver_key = cache.make_and_validate_key(f"{prefix}ver:{user_id}")
+        jti_key = cache.make_and_validate_key(f"{prefix}{claims['jti']}")
+        try:
+            # Returning None requests method-based fallback, which must call
+            # the custom cache.get rather than directly querying Redis.
+            assert asyncio.run(store.get_refresh_state(claims["jti"], claims["fam"], user_id)) is None
+            assert asyncio.run(store.is_family_revoked(claims["fam"])) is True
+            routes = _Routes()
+            JWTAuthViews(store=store, secret=SECRET).register(routes)
+            request = {"context": {"auth_claims": claims, "user_id": user_id}}
+            with pytest.raises(HTTPException) as error:
+                asyncio.run(routes.handlers[endpoint](request))
+            assert error.value.status_code == 401
+            assert client.get(fam_key) is None  # No real mutation occurred.
+            assert client.get(ver_key) is None
+        finally:
+            client.delete(fam_key, ver_key, jti_key)
+            cache.close()
