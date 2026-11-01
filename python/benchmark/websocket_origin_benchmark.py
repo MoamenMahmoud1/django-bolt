@@ -175,7 +175,12 @@ def main():
             if key in base:
                 before = base[key]["median_ns_per_call"]
                 after = row["median_ns_per_call"]
-                print(f"{row['policy']}: {before} -> {after} ns/call ({(after / before - 1) * 100:+.2f}%)")
+                old_p95 = base[key]["p95_batch_ns_per_call"]
+                new_p95 = row["p95_batch_ns_per_call"]
+                print(f"{row['policy']}: median {before} -> {after} ns/call "
+                      f"({(after / before - 1) * 100:+.2f}%); "
+                      f"p95 batch {old_p95} -> {new_p95} ns/call "
+                      f"({(new_p95 / old_p95 - 1) * 100:+.2f}%)")
             else:
                 print(f"{row['policy']}: new feature, no baseline counterpart")
         old_handshakes = {entry["policy"]: entry for entry in baseline.get("roundtrips", [])}
@@ -184,8 +189,12 @@ def main():
             if old:
                 before = old["median_ns_per_connection"]
                 after = entry["median_ns_per_connection"]
-                print(f"full {entry['policy']}: {before} -> {after} ns/connection "
-                      f"({(after / before - 1) * 100:+.2f}%)")
+                old_p95 = old["p95_ns_per_connection"]
+                new_p95 = entry["p95_ns_per_connection"]
+                print(f"full {entry['policy']}: median {before} -> {after} ns/connection "
+                      f"({(after / before - 1) * 100:+.2f}%); "
+                      f"p95 {old_p95} -> {new_p95} ns/connection "
+                      f"({(new_p95 / old_p95 - 1) * 100:+.2f}%)")
 
 
 if __name__ == "__main__":
