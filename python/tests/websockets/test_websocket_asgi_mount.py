@@ -105,21 +105,40 @@ async def test_mounted_app_echoes_text(api):
 
 
 @pytest.mark.asyncio
-async def test_mounted_asgi_app_owns_origin_policy(api):
-    """A mounted ASGI app is not subject to Bolt's global CORS allowlist."""
+async def test_default_mount_inherits_origin_policy(api):
+    """A legacy mount retains Bolt's global protection without configuration."""
     options = {
         "headers": {"Origin": "https://different.example"},
         "cors_allowed_origins": ["https://allowed-by-bolt.example"],
         "read_django_settings": False,
     }
-
-    async with WebSocketTestClient(api, "/mounted/ws", **options) as ws:
-        await ws.send_text("hello")
-        assert await ws.receive_text() == "echo:hello"
+    with pytest.raises(PermissionError, match="Origin not allowed"):
+        async with WebSocketTestClient(api, "/mounted/ws", **options):
+            pass
 
     with pytest.raises(PermissionError, match="Origin not allowed"):
         async with WebSocketTestClient(api, "/ws/direct", **options):
             pass
+
+
+@pytest.mark.asyncio
+async def test_explicit_mount_allowlist_is_strict():
+    api = BoltAPI()
+    api.mount_asgi(
+        "/restricted", echo_app, websocket_origin_policy="allowlist",
+        websocket_allowed_origins=["https://restricted.example"],
+    )
+    options = {"cors_allowed_origins": ["https://global.example"], "read_django_settings": False}
+    async with WebSocketTestClient(
+        api, "/restricted/ws", headers={"Origin": "https://restricted.example"}, **options
+    ) as ws:
+        await ws.send_text("hello")
+        assert await ws.receive_text() == "echo:hello"
+
+    for headers in ({}, {"Origin": "https://global.example"}, {"Origin": "https://evil.example"}):
+        with pytest.raises(PermissionError, match="Origin not allowed"):
+            async with WebSocketTestClient(api, "/restricted/ws", headers=headers, **options):
+                pass
 
 
 @pytest.mark.asyncio
@@ -135,7 +154,7 @@ async def test_mounted_asgi_app_can_reject_origins_it_does_not_trust():
         await send({"type": "websocket.send", "text": "trusted"})
 
     api = BoltAPI()
-    api.mount_asgi("/protected", protected_app)
+    api.mount_asgi("/protected", protected_app, websocket_origin_policy="delegate")
     options = {
         "cors_allowed_origins": ["https://bolt-policy.example"],
         "read_django_settings": False,
@@ -147,6 +166,27 @@ async def test_mounted_asgi_app_can_reject_origins_it_does_not_trust():
         async with WebSocketTestClient(api, "/protected/ws", headers={"Origin": "https://untrusted.example"}, **options):
             pass
     assert rejected.value.status_code == 403
+
+
+def test_mount_origin_policy_validation():
+    async def app(scope, receive, send):
+        return None
+
+    for policy in ("unknown", "INHERIT", ""):
+        with pytest.raises(ValueError, match="websocket_origin_policy"):
+            BoltAPI().mount_asgi("/bad", app, websocket_origin_policy=policy)
+
+    with pytest.raises(ValueError, match="nonempty list"):
+        BoltAPI().mount_asgi("/bad", app, websocket_origin_policy="allowlist")
+
+    for origin in ("*", "https://a.example/path", "https://a.example:99999", "https://a.example@evil.test"):
+        with pytest.raises(ValueError, match="Invalid WebSocket origin"):
+            BoltAPI().mount_asgi(
+                "/bad", app, websocket_origin_policy="allowlist", websocket_allowed_origins=[origin]
+            )
+
+    with pytest.raises(ValueError, match="requires"):
+        BoltAPI().mount_asgi("/bad", app, websocket_allowed_origins=["https://a.example"])
 
 
 @pytest.mark.asyncio
