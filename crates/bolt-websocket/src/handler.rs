@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::{mpsc, oneshot};
 
 use bolt_core::metadata::RouteMetadata;
+use bolt_core::state::WebSocketOriginPolicy;
 use bolt_core::middleware::auth::{AuthContext, populate_auth_context};
 use bolt_core::middleware::client_ip::{TrustedProxies, resolve_scheme};
 use bolt_core::middleware::rate_limit::{check_after_auth, check_before_auth};
@@ -640,6 +641,7 @@ pub enum WsTarget {
     AsgiMount {
         app: Py<PyAny>,
         mount_prefix: String,
+        origin_policy: Arc<WebSocketOriginPolicy>,
     },
 }
 
@@ -754,12 +756,20 @@ pub async fn handle_websocket_upgrade(
         }
     }
 
-    // Native Bolt routes use the global WebSocket Origin policy.
-    // Mounted ASGI apps own their Origin checks (for example, Channels'
-    // OriginValidator), just as they own their other middleware.
-    if route_handler_id.is_some()
-        && !origin::validate_origin(req.headers().get(ORIGIN), state.global_cors_config.as_ref())
-    {
+    // Native routes and default mounts preserve Bolt's global Origin policy.
+    // An ASGI mount may explicitly choose a dedicated allowlist or delegate
+    // validation to its own middleware. No Python runs for this check.
+    let origin_allowed = match &target {
+        WsTarget::Route { .. } => {
+            origin::validate_origin(req.headers().get(ORIGIN), state.global_cors_config.as_ref())
+        }
+        WsTarget::AsgiMount { origin_policy, .. } => origin::validate_mount_origin(
+            req.headers().get(ORIGIN),
+            state.global_cors_config.as_ref(),
+            origin_policy,
+        ),
+    };
+    if !origin_allowed {
         return Ok(HttpResponse::Forbidden()
             .content_type("application/json")
             .body(r#"{"detail":"Origin not allowed"}"#));
