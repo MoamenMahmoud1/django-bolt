@@ -12,6 +12,7 @@ import threading
 from collections.abc import Callable, Collection, Sequence
 from contextlib import suppress
 from typing import Any, get_origin, get_type_hints
+from urllib.parse import urlsplit
 
 # Django import - may fail if Django not configured
 try:
@@ -269,6 +270,23 @@ def _normalize_mount_prefix(path: str) -> str:
         raise ValueError(f"ASGI mount path must be static (no dynamic parameters), got: {mount_path}")
 
     return mount_path
+
+
+class _ConfiguredASGIMount:
+    """Keep per-mount WebSocket policy without changing the ASGI mount wire format.
+
+    Rust reads these attributes once when registering the mount; the app only
+    gains one forwarding call when a nondefault policy is explicitly selected.
+    """
+
+    def __init__(self, app: Callable[..., Any], policy: str, origins: list[str] | None):
+        self._app = app
+        self._bolt_websocket_origin_policy = policy
+        self._bolt_websocket_allowed_origins = origins or []
+        self._bolt_http_only = getattr(app, "_bolt_http_only", False)
+
+    async def __call__(self, scope, receive, send):
+        await self._app(scope, receive, send)
 
 
 def _validate_asgi_mount_conflicts(
@@ -3646,10 +3664,49 @@ class BoltAPI:
         if child_formatter is not None:
             self._error_formatter = child_formatter
 
-    def mount_asgi(self, path: str, app: Callable[..., Any]) -> None:
-        """Mount an ASGI app at a static prefix (evaluated after Bolt route miss)."""
+    def mount_asgi(
+        self,
+        path: str,
+        app: Callable[..., Any],
+        *,
+        websocket_origin_policy: str = "inherit",
+        websocket_allowed_origins: list[str] | None = None,
+    ) -> None:
+        """Mount an ASGI app, keeping Bolt's WebSocket Origin check by default.
+
+        `inherit` uses the global Bolt allowlist; `allowlist` uses exact
+        origins for this mount and requires the Origin header; `delegate`
+        opts out of Bolt's check so the mounted app MUST enforce its own.
+        """
         if not callable(app):
             raise TypeError(f"mount_asgi() expects a callable ASGI application, got {type(app).__name__}")
+        if websocket_origin_policy not in ("inherit", "allowlist", "delegate"):
+            raise ValueError("websocket_origin_policy must be 'inherit', 'allowlist', or 'delegate'")
+        if websocket_origin_policy == "allowlist":
+            if not isinstance(websocket_allowed_origins, list) or not websocket_allowed_origins:
+                raise ValueError("websocket_allowed_origins must be a nonempty list for 'allowlist'")
+            for origin in websocket_allowed_origins:
+                if not isinstance(origin, str):
+                    raise TypeError("WebSocket allowed origins must be strings")
+                try:
+                    parsed = urlsplit(origin)
+                    valid = (
+                        parsed.scheme in ("http", "https")
+                        and bool(parsed.hostname)
+                        and parsed.username is None
+                        and parsed.password is None
+                        and parsed.path == ""
+                        and parsed.query == ""
+                        and parsed.fragment == ""
+                        and parsed.port != 0
+                        and origin == f"{parsed.scheme}://{parsed.netloc}"
+                    )
+                except ValueError:
+                    valid = False
+                if not valid:
+                    raise ValueError(f"Invalid WebSocket origin: {origin!r}")
+        elif websocket_allowed_origins is not None:
+            raise ValueError("websocket_allowed_origins requires websocket_origin_policy='allowlist'")
 
         mount_path = _normalize_mount_prefix(path)
 
@@ -3663,7 +3720,12 @@ class BoltAPI:
             raise ValueError(f"Duplicate ASGI mount prefix: {mount_path}")
 
         self._asgi_mount_prefixes.add(mount_path)
-        self._asgi_mounts.append((mount_path, app))
+        mounted_app = (
+            app
+            if websocket_origin_policy == "inherit"
+            else _ConfiguredASGIMount(app, websocket_origin_policy, websocket_allowed_origins)
+        )
+        self._asgi_mounts.append((mount_path, mounted_app))
 
     def mount_django(self, path: str, app: Any | None = None, *, clear_root_path: bool = False) -> None:
         """Mount Django's ASGI app at a path prefix (convenience wrapper over mount_asgi).
