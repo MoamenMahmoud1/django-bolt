@@ -158,26 +158,34 @@ ASGI mounts run outside Bolt's route middleware pipeline.
 
 That means Bolt-level middleware features (for example rate limits, Bolt auth guards, and Bolt CORS behavior) do not apply to mounted ASGI apps. Mounted Django apps should rely on Django middleware/settings for those concerns.
 
-WebSocket handshakes have a secure, backward-compatible Origin policy by
-default: a mounted ASGI app **inherits** Bolt's global
-`CORS_ALLOWED_ORIGINS` / `CORS_ALLOWED_ORIGIN_REGEXES` policy.
-HTTP requests still follow the mounted app's own middleware.
-
-For a WebSocket app with its own security policy, opt in explicitly:
+ASGI WebSocket mounts follow the same global policy configured in
+`settings.py` as native Bolt WebSockets; without new settings, this is the
+backward-compatible global CORS Origin check. Explicit mount-level options
+override the settings. The HTTP ASGI application still owns its own HTTP
+middleware, authentication and CORS response headers.
 
 ```python
-# Default: inherit Bolt's global WebSocket Origin allowlist.
+# Inherits the global WebSocket Origin policy.
 api.mount_asgi("/legacy", legacy_app)
 
-# Separate strict allowlist. Origin is required and must match exactly.
+# Exact per-mount allowlist; rejects missing Origin by default.
 api.mount_asgi(
     "/support",
     support_app,
     websocket_origin_policy="allowlist",
     websocket_allowed_origins=["https://support.example.com"],
+    websocket_allow_missing_origin=False,
 )
 
-# Only for an ASGI app with its own Origin protection.
+# Dynamic per-mount validator, sync or async, before HTTP 101.
+api.mount_asgi(
+    "/tenant",
+    tenant_app,
+    websocket_origin_policy="custom",
+    websocket_origin_validator=validate_tenant_origin,
+)
+
+# App already validates its Origin, so delegation is explicit.
 from channels.security.websocket import OriginValidator
 
 api.mount_asgi(
@@ -187,12 +195,18 @@ api.mount_asgi(
 )
 ```
 
-`delegate` intentionally bypasses Bolt's Origin check on the mounted app.
-**Do not use it without an ASGI Origin validator**, especially when browser
-cookies authenticate the connection. It does not disable the app's own auth
-and authorization. Missing Origin is rejected in `allowlist` mode;
-`inherit` retains Bolt's existing behavior for non-browser clients.
-The selected policy is compiled once when the mount is registered.
+`"any"` is another explicit option for public cross-origin browser access;
+the standalone `websocket_allow_missing_origin` option controls clients
+without an Origin. Unlike `"any"`, `"delegate"` bypasses Bolt's Origin
+policy entirely. **Only delegate to an application that enforces its own
+Origin security**, particularly with cookie-based authentication. Global
+settings are `BOLT_WEBSOCKET_ORIGIN_POLICY`,
+`BOLT_WEBSOCKET_ALLOWED_ORIGINS`,
+`BOLT_WEBSOCKET_ALLOW_MISSING_ORIGIN` and
+`BOLT_WEBSOCKET_ORIGIN_VALIDATOR`.
+The policies are parsed once at registration in Rust; custom Python callbacks
+run once per connection before acceptance and fail closed on exceptions or
+timeouts. See [WebSocket Origin policy](websocket.md#origin-policy).
 
 ## Timeouts and body limits
 
