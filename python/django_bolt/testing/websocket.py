@@ -29,6 +29,8 @@ from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 from django_bolt import BoltAPI, _core
+from django_bolt.api import _resolved_asgi_mounts
+from django_bolt.websocket.origin_policy import OriginOptions, resolve_origin_options
 from django_bolt.websocket import CloseCode, WebSocket
 from django_bolt.websocket.handlers import build_websocket_request, get_websocket_param_name
 
@@ -148,13 +150,21 @@ class WebSocketTestClient:
             # Get pre-compiled injector from handler metadata (same as runbolt.py)
             meta = self.api._handler_meta.get(handler_id, {})
             injector = meta.get("injector")
-            ws_routes.append((path, handler_id, handler, injector))
+            ws_routes.append((
+                path, handler_id, handler, injector,
+                resolve_origin_options(
+                    self.api._websocket_origin_options.get(handler_id, OriginOptions()),
+                    read_settings=self._read_django_settings,
+                ),
+            ))
         if ws_routes:
             _core.register_test_websocket_routes(self._app_id, ws_routes)
 
         # Register ASGI mounts so an unmatched path can fall back to one
         if self.api._asgi_mounts:
-            _core.register_test_asgi_mounts(self._app_id, list(self.api._asgi_mounts))
+            _core.register_test_asgi_mounts(
+                self._app_id, _resolved_asgi_mounts(self.api._asgi_mounts, read_settings=self._read_django_settings)
+            )
 
         # Register middleware metadata for guards/auth
         if self.api._handler_middleware:
