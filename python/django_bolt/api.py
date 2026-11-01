@@ -3659,7 +3659,9 @@ class BoltAPI:
             self._next_handler_id += 1
 
             self._websocket_routes.append((new_path, new_handler_id, handler))
-            self._websocket_origin_options[new_handler_id] = app._websocket_origin_options.get(handler_id, OriginOptions())
+            self._websocket_origin_options[new_handler_id] = app._websocket_origin_options.get(
+                handler_id, OriginOptions()
+            )
             self._handlers[new_handler_id] = handler
 
             # Copy handler metadata, layered as for HTTP routes above.
