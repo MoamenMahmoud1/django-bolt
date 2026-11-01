@@ -38,6 +38,8 @@ from django_bolt.testing import WebSocketTestClient  # noqa: E402
 async def echo_app(scope, receive, send):
     await receive()
     await send({"type": "websocket.accept"})
+    while (await receive())["type"] != "websocket.disconnect":
+        pass
 
 
 def measure(path: str, policy: str, count: int, repeats: int) -> dict:
