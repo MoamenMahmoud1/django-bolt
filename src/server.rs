@@ -1154,10 +1154,15 @@ async fn websocket_not_found_handler(
     if let Some(mount) = find_websocket_mount(state.get_ref(), normalized_path) {
         let app = Python::attach(|py| mount.app.clone_ref(py));
         let mount_prefix = mount.prefix.clone();
+        let origin_policy = mount.websocket_origin_policy.clone();
         return handle_websocket_upgrade(
             req,
             stream,
-            WsTarget::AsgiMount { app, mount_prefix },
+            WsTarget::AsgiMount {
+                app,
+                mount_prefix,
+                origin_policy,
+            },
             state.get_ref().clone(),
         )
         .await;
