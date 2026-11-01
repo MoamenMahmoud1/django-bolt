@@ -158,6 +158,14 @@ ASGI mounts run outside Bolt's route middleware pipeline.
 
 That means Bolt-level middleware features (for example rate limits, Bolt auth guards, and Bolt CORS behavior) do not apply to mounted ASGI apps. Mounted Django apps should rely on Django middleware/settings for those concerns.
 
+For WebSocket handshakes, Bolt checks the global CORS Origin allowlist on its own
+`@api.websocket` routes, but **does not apply that check to a mounted ASGI
+application**. The mounted application must enforce its own WebSocket Origin
+policy, for example using Django Channels' `OriginValidator` or
+`AllowedHostsOriginValidator`. This is especially important when the
+connection authenticates with browser cookies: mounting an ASGI app does not
+make Bolt's `CORS_ALLOWED_ORIGINS` a security boundary for that app.
+
 ## Timeouts and body limits
 
 - `BOLT_ASGI_MOUNT_TIMEOUT` (seconds, default `30`) limits how long Bolt waits for the mounted ASGI app to send the first `http.response.start` message (response headers). Once headers arrive, the response body streams indefinitely with no additional timeout. Timeout returns `504 Gateway Timeout`.
