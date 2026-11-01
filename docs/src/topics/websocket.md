@@ -273,10 +273,14 @@ against the global `CORS_ALLOWED_ORIGINS` and
 Without a configured allowlist, browser requests with an Origin are denied.
 Non-browser clients may omit or forge Origin: it is not authentication.
 
-Mounted ASGI applications do **not** inherit Bolt's WebSocket Origin check.
-The mounted application must validate origins itself, for example with
-Django Channels' `OriginValidator` or `AllowedHostsOriginValidator`;
-see [ASGI mounts](asgi-mounts.md#middleware-boundary).
+Mounted ASGI applications inherit Bolt's global WebSocket Origin check
+**by default**, preserving existing security behavior. Use a dedicated
+`websocket_origin_policy="allowlist"` with `websocket_allowed_origins=[...]`,
+or explicitly `"delegate"` to an app with its own Origin validator
+(such as Django Channels' `OriginValidator`). See
+[ASGI mounts](asgi-mounts.md#middleware-boundary).
+A custom allowlist requires Origin to be present; inherited policy retains
+the existing missing-Origin behavior for non-browser clients.
 
 ## Authentication
 
