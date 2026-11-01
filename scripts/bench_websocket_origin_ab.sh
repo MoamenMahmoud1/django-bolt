@@ -27,6 +27,7 @@ git -C "$REPO" worktree add --detach "$BEFORE" "$BEFORE_REF"
 git -C "$REPO" worktree add --detach "$AFTER" "$AFTER_REF"
 
 # The benchmark is new: copy the EXACT same script into the old tree.
+mkdir -p "$BEFORE/python/benchmark"
 cp "$AFTER/python/benchmark/websocket_origin_benchmark.py" \
    "$BEFORE/python/benchmark/websocket_origin_benchmark.py"
 
