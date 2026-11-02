@@ -46,8 +46,10 @@ BOLT_WEBSOCKET_ALLOW_MISSING_ORIGIN = False
   An allowed missing Origin never proves a client's identity.
 - **`BOLT_WEBSOCKET_ORIGIN_VALIDATOR`**: callable or dotted import path,
   required for `custom`. Supports sync `def` and `async def`. Its
-  signature is `(origin, context) -> bool`, where context has `path`,
-  `query_string`, and `headers`. A timeout or invalid return fails closed.
+  signature is `(origin, context) -> bool | Awaitable[bool]`; context has
+  `path`, `query_string`, and `headers`. Errors, non-boolean results, and
+  timeouts reject the handshake. See [Origin policy](../topics/websocket.md#custom-validation)
+  for resource limits and cancellation behavior.
 
 These options raise `ValueError` for invalid policy combinations or Origin entries.
 A non-boolean missing-Origin flag raises `TypeError`.

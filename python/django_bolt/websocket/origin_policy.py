@@ -9,6 +9,7 @@ import asyncio
 import concurrent.futures
 import contextvars
 import inspect
+import queue
 import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -37,20 +38,59 @@ OriginValidator = Callable[[str | None, OriginContext], bool | Awaitable[bool]]
 # slow user callbacks from occupying bolt_default threads used by handlers.
 _MAX_PENDING_CUSTOM_ORIGINS = 64
 _SYNC_ORIGIN_WORKERS = 8
+# Run Python's cancellation just ahead of the Rust five-second safety timeout.
+# An uncooperative coroutine that suppresses cancellation retains its slot.
+_PYTHON_ORIGIN_TIMEOUT_SECONDS = 4.9
 _pending_custom_origins = threading.BoundedSemaphore(_MAX_PENDING_CUSTOM_ORIGINS)
 _sync_origin_slots = threading.BoundedSemaphore(_SYNC_ORIGIN_WORKERS)
 _sync_origin_executor_lock = threading.Lock()
-_sync_origin_executor: concurrent.futures.ThreadPoolExecutor | None = None
+# Python's ThreadPoolExecutor joins its non-daemon threads at interpreter
+# exit. A user validator can block forever, so use a small daemon worker pool
+# instead. The semaphore in _run_sync_origin_validator still limits admission;
+# it releases each slot only when its Future ends (not on handshake timeout).
+class _DaemonOriginExecutor:
+    def __init__(self) -> None:
+        self._jobs: queue.SimpleQueue[tuple[concurrent.futures.Future, Callable, tuple]] = queue.SimpleQueue()
+        self._lock = threading.Lock()
+        self._outstanding = 0
+        self._threads: list[threading.Thread] = []
+
+    def submit(self, callback: Callable, *args: Any) -> concurrent.futures.Future:
+        future: concurrent.futures.Future = concurrent.futures.Future()
+        with self._lock:
+            self._outstanding += 1
+            self._jobs.put((future, callback, args))
+            if len(self._threads) < min(self._outstanding, _SYNC_ORIGIN_WORKERS):
+                worker = threading.Thread(
+                    target=self._run, name=f"bolt_ws_origin_{len(self._threads)}", daemon=True
+                )
+                self._threads.append(worker)
+                worker.start()
+        return future
+
+    def _run(self) -> None:
+        while True:
+            future, callback, args = self._jobs.get()
+            try:
+                if future.set_running_or_notify_cancel():
+                    try:
+                        future.set_result(callback(*args))
+                    except BaseException as exc:
+                        future.set_exception(exc)
+            finally:
+                with self._lock:
+                    self._outstanding -= 1
 
 
-def _get_sync_origin_executor() -> concurrent.futures.ThreadPoolExecutor:
+_sync_origin_executor: _DaemonOriginExecutor | None = None
+
+
+def _get_sync_origin_executor() -> _DaemonOriginExecutor:
     global _sync_origin_executor
     if _sync_origin_executor is None:
         with _sync_origin_executor_lock:
             if _sync_origin_executor is None:
-                _sync_origin_executor = concurrent.futures.ThreadPoolExecutor(
-                    max_workers=_SYNC_ORIGIN_WORKERS, thread_name_prefix="bolt_ws_origin"
-                )
+                _sync_origin_executor = _DaemonOriginExecutor()
     return _sync_origin_executor
 
 
@@ -167,15 +207,19 @@ def resolve_origin_options(
             if not _pending_custom_origins.acquire(blocking=False):
                 raise RuntimeError("Too many pending WebSocket Origin validations")
             try:
-                if inspect.iscoroutinefunction(func):
-                    result = await func(origin, context)
-                else:
-                    result = await _run_sync_origin_validator(func, origin, context)
-                    if inspect.isawaitable(result):
-                        result = await result
-                if type(result) is not bool:
-                    raise TypeError("WebSocket origin_validator must return bool")
-                return result
+                # Rust timing out its await does not cancel the Python task
+                # created by pyo3-async-runtimes. Cancel it on the Python loop
+                # so a cooperative async validator releases admission promptly.
+                async with asyncio.timeout(_PYTHON_ORIGIN_TIMEOUT_SECONDS):
+                    if inspect.iscoroutinefunction(func):
+                        result = await func(origin, context)
+                    else:
+                        result = await _run_sync_origin_validator(func, origin, context)
+                        if inspect.isawaitable(result):
+                            result = await result
+                    if type(result) is not bool:
+                        raise TypeError("WebSocket origin_validator must return bool")
+                    return result
             finally:
                 _pending_custom_origins.release()
 

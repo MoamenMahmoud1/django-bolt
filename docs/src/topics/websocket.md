@@ -361,9 +361,12 @@ operations or untrusted tenant identifiers. Never use Origin as auth.
 Sync callbacks run in a separate, lazily created pool (up to eight running
 callbacks per process), not the general handler executor. Up to 64 custom
 validations may be pending per process; excess handshakes fail closed. When a
-sync callback times out, its thread may continue running, and its execution
-slot is not reused until it finishes. The five-second timeout still applies
-to the handshake. Keep callbacks bounded and free of side effects.
+sync callback times out, its thread may continue running and keeps its
+execution slot until it finishes. Dedicated daemon workers do not block process
+exit, but the process may stop them without cleanup. The Python deadline cancels
+cooperative async callbacks before Rust's five-second safety timeout; callbacks
+that suppress cancellation can hold admission until they finish. Keep callbacks
+bounded and free of side effects.
 The context path includes the mount prefix. The query string is a string without `?`.
 Headers are client input, not trusted tenant or identity data.
 

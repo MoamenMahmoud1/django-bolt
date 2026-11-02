@@ -155,3 +155,8 @@ def test_custom_failures_and_timeouts_deny_real_handshakes(make_server_project, 
             )
             assert " 403 " in status
             assert body == REJECTED_BODY
+        # Recovery must work on this same server after a Python timeout.
+        accepted, _ = attempt_ws_upgrade(
+            server.host, server.port, f"{path}?approve", headers={"Origin": "https://allowed.example"}
+        )
+        assert " 101 " in accepted
