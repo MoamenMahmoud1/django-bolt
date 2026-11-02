@@ -23,6 +23,21 @@ trap cleanup EXIT
 
 before_commit="$(git -C "$REPO" rev-parse --verify "$BEFORE_REF^{commit}")"
 if [ "$AFTER_REF" = WORKING_TREE ]; then
+    results_relative=""
+    if [[ "$RESULTS_DIR" == "$REPO/"* ]]; then
+        results_relative="${RESULTS_DIR#"$REPO"/}"
+    fi
+    while IFS= read -r -d '' untracked_file; do
+        # Existing and newly written benchmark outputs are not source inputs.
+        case "$untracked_file" in
+            websocket-origin-ab-results/*) continue ;;
+        esac
+        if [[ -n "$results_relative" && "$untracked_file" == "$results_relative/"* ]]; then
+            continue
+        fi
+        printf 'Untracked source not included in WORKING_TREE benchmark: %s\n' "$untracked_file" >&2
+        exit 1
+    done < <(git -C "$REPO" ls-files --others --exclude-standard -z)
     after_commit="$(git -C "$REPO" rev-parse HEAD)"
     git -C "$REPO" diff --binary HEAD > "$RESULTS_DIR/final.patch"
 else

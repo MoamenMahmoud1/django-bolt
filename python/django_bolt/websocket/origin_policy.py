@@ -6,7 +6,10 @@ Python validators are opt-in and run only before the opening handshake.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import contextvars
 import inspect
+import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from ipaddress import IPv6Address
@@ -29,6 +32,40 @@ class OriginContext(TypedDict):
 
 
 OriginValidator = Callable[[str | None, OriginContext], bool | Awaitable[bool]]
+
+# Only custom policies pay for admission control. A dedicated pool prevents
+# slow user callbacks from occupying bolt_default threads used by handlers.
+_MAX_PENDING_CUSTOM_ORIGINS = 64
+_SYNC_ORIGIN_WORKERS = 8
+_pending_custom_origins = threading.BoundedSemaphore(_MAX_PENDING_CUSTOM_ORIGINS)
+_sync_origin_slots = threading.BoundedSemaphore(_SYNC_ORIGIN_WORKERS)
+_sync_origin_executor_lock = threading.Lock()
+_sync_origin_executor: concurrent.futures.ThreadPoolExecutor | None = None
+
+
+def _get_sync_origin_executor() -> concurrent.futures.ThreadPoolExecutor:
+    global _sync_origin_executor
+    if _sync_origin_executor is None:
+        with _sync_origin_executor_lock:
+            if _sync_origin_executor is None:
+                _sync_origin_executor = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=_SYNC_ORIGIN_WORKERS, thread_name_prefix="bolt_ws_origin"
+                )
+    return _sync_origin_executor
+
+
+async def _run_sync_origin_validator(func: Callable, origin: str | None, context: OriginContext) -> Any:
+    if not _sync_origin_slots.acquire(blocking=False):
+        raise RuntimeError("Too many synchronous WebSocket Origin validations")
+    try:
+        future = _get_sync_origin_executor().submit(contextvars.copy_context().run, func, origin, context)
+    except BaseException:
+        _sync_origin_slots.release()
+        raise
+    # A running thread is not cancellable. The permit belongs to its concurrent
+    # Future until it *actually* exits, even if the handshake times out first.
+    future.add_done_callback(lambda _completed: _sync_origin_slots.release())
+    return await asyncio.wrap_future(future)
 
 
 @dataclass(frozen=True)
@@ -127,17 +164,20 @@ def resolve_origin_options(
         func = validator
 
         async def checked(origin: str | None, context: OriginContext) -> bool:
-            if inspect.iscoroutinefunction(func):
-                result = await func(origin, context)
-            else:
-                # A slow synchronous validator must not block the worker's
-                # asyncio loop. Only custom policies pay this thread cost.
-                result = await asyncio.to_thread(func, origin, context)
-                if inspect.isawaitable(result):
-                    result = await result
-            if type(result) is not bool:
-                raise TypeError("WebSocket origin_validator must return bool")
-            return result
+            if not _pending_custom_origins.acquire(blocking=False):
+                raise RuntimeError("Too many pending WebSocket Origin validations")
+            try:
+                if inspect.iscoroutinefunction(func):
+                    result = await func(origin, context)
+                else:
+                    result = await _run_sync_origin_validator(func, origin, context)
+                    if inspect.isawaitable(result):
+                        result = await result
+                if type(result) is not bool:
+                    raise TypeError("WebSocket origin_validator must return bool")
+                return result
+            finally:
+                _pending_custom_origins.release()
 
         validator = checked
     elif local.validator is not None:

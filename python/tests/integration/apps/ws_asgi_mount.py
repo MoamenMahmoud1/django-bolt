@@ -66,10 +66,15 @@ async def echo_app(scope, receive, send):
 
 async def origin_guarded_app(scope, receive, send):
     """A delegated application that deliberately validates its own Origin."""
-    headers = dict(scope["headers"])
-    if headers.get(b"origin") != b"https://delegated.example":
+    origins = [value for name, value in scope["headers"] if name == b"origin"]
+    if not origins or any(value != b"https://delegated.example" for value in origins):
         await receive()
         await send({"type": "websocket.close"})
+        return
+    if scope["query_string"] == b"report_origins":
+        await receive()
+        await send({"type": "websocket.accept"})
+        await send({"type": "websocket.send", "text": json.dumps([v.decode() for v in origins])})
         return
     await echo_app(scope, receive, send)
 

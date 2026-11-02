@@ -855,13 +855,18 @@ pub fn handle_test_websocket(
                         false,
                         &app.config.trusted_proxies,
                     ) == "https";
+                    // Preserve raw line order and repeated headers, as runbolt does.
+                    let scope_headers: Vec<(String, String)> = headers
+                        .iter()
+                        .map(|(name, value)| (name.to_lowercase(), value.clone()))
+                        .collect();
                     // Give the app the request path as sent, as the server does.
                     let scope = build_asgi_scope_from_parts(
                         py,
                         &mount.prefix,
                         &path,
                         query_string.as_deref().unwrap_or_default().as_bytes(),
-                        header_map
+                        scope_headers
                             .iter()
                             .map(|(name, value)| (name.as_str(), value.as_bytes())),
                         secure,

@@ -415,6 +415,24 @@ def main():
                     f"p95 {old_p95} -> {new_p95} ns/connection "
                     f"({(new_p95 / old_p95 - 1) * 100:+.2f}%)"
                 )
+        old_network = {(entry["target"], entry["policy"]): entry for entry in baseline.get("network", [])}
+        for entry in network:
+            old = old_network.get((entry["target"], entry["policy"]))
+            if old is None:
+                continue
+            before, after = old["median_ns"], entry["median_ns"]
+            old_p95, new_p95 = old["p95_ns"], entry["p95_ns"]
+            # New policy names were exercised with inherited CORS on upstream.
+            # Label both effective policies rather than implying a like-for-like
+            # comparison of a custom policy that did not exist upstream.
+            policies = f"{old.get('effective_policy', 'inherit')} -> {entry.get('effective_policy', entry['policy'])}"
+            print(
+                f"network {entry['target']}/{entry['policy']} (effective {policies}): "
+                f"median {before} -> {after} ns/handshake "
+                f"({(after / before - 1) * 100:+.2f}%); "
+                f"p95 {old_p95} -> {new_p95} ns/handshake "
+                f"({(new_p95 / old_p95 - 1) * 100:+.2f}%)"
+            )
 
 
 if __name__ == "__main__":

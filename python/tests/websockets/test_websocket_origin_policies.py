@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 from django.test import override_settings
@@ -15,7 +16,11 @@ from django_bolt.websocket.origin_policy import resolve_origin_options
 async def mounted(scope, receive, send):
     await receive()
     await send({"type": "websocket.accept"})
-    await send({"type": "websocket.send", "text": "mounted"})
+    if scope["query_string"] == b"report_origins":
+        origins = [value.decode() for name, value in scope["headers"] if name == b"origin"]
+        await send({"type": "websocket.send", "text": json.dumps(origins)})
+    else:
+        await send({"type": "websocket.send", "text": "mounted"})
 
 
 def make_api(*, native_options=None, mount_options=None):
@@ -261,9 +266,10 @@ async def test_repeated_origins_cannot_disagree_between_policy_and_context(path,
 async def test_delegate_leaves_repeated_origin_decisions_to_the_app():
     api = make_api(mount_options={"websocket_origin_policy": "delegate"})
     async with WebSocketTestClient(
-        api, "/mounted/ws", headers={"Origin": "https://first.example", "origin": "https://second.example"},
+        api, "/mounted/ws", query_string="report_origins",
+        headers={"Origin": "https://first.example", "origin": "https://second.example"},
     ) as ws:
-        assert await ws.receive_text() == "mounted"
+        assert json.loads(await ws.receive_text()) == ["https://first.example", "https://second.example"]
 
 
 @pytest.mark.asyncio

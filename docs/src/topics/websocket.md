@@ -358,8 +358,12 @@ by default for custom policies unless allowed explicitly; even then the
 validator still has to approve it. Python runs only for `custom`, once per
 handshake, and is slower than the Rust-only policies. Avoid slow database
 operations or untrusted tenant identifiers. Never use Origin as auth.
-Sync callbacks run in a thread. Cancellation cannot stop a running sync callback.
-Keep callbacks bounded and free of side effects.
+Sync callbacks run in a separate, lazily created pool (up to eight running
+callbacks per process), not the general handler executor. Up to 64 custom
+validations may be pending per process; excess handshakes fail closed. When a
+sync callback times out, its thread may continue running, and its execution
+slot is not reused until it finishes. The five-second timeout still applies
+to the handshake. Keep callbacks bounded and free of side effects.
 The context path includes the mount prefix. The query string is a string without `?`.
 Headers are client input, not trusted tenant or identity data.
 

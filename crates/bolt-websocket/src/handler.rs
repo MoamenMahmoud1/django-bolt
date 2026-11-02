@@ -659,6 +659,32 @@ async fn token_revoked(check: &Py<PyAny>, auth_ctx: &AuthContext) -> PyResult<bo
     Python::attach(|py| revoked.extract::<bool>(py))
 }
 
+// Custom-only admission: bounded pending handshakes even if the Python loop
+// cannot start promptly. The separate Python sync-worker budget survives a
+// cancelled handshake until its underlying blocking callback really finishes.
+const MAX_PENDING_CUSTOM_ORIGIN_CHECKS: usize = 64;
+static PENDING_CUSTOM_ORIGIN_CHECKS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+struct PendingCustomOriginSlot;
+
+impl PendingCustomOriginSlot {
+    fn try_acquire() -> Option<Self> {
+        PENDING_CUSTOM_ORIGIN_CHECKS
+            .try_update(Ordering::AcqRel, Ordering::Relaxed, |pending| {
+                (pending < MAX_PENDING_CUSTOM_ORIGIN_CHECKS).then_some(pending + 1)
+            })
+            .ok()
+            .map(|_| Self)
+    }
+}
+
+impl Drop for PendingCustomOriginSlot {
+    fn drop(&mut self) {
+        PENDING_CUSTOM_ORIGIN_CHECKS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 /// Run the optional Python validator before upgrading. Errors and timeouts
 /// fail closed. Other policies remain completely on the Rust fast path.
 async fn check_custom_origin(
@@ -670,6 +696,9 @@ async fn check_custom_origin(
 ) -> bool {
     let WebSocketOriginPolicy::Custom { validator, .. } = policy else {
         return true;
+    };
+    let Some(_pending_slot) = PendingCustomOriginSlot::try_acquire() else {
+        return false;
     };
     let origin = origin.and_then(|v| v.to_str().ok()).map(str::to_owned);
     let future = Python::attach(|py| -> PyResult<_> {

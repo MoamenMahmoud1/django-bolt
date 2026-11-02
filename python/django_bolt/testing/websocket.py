@@ -304,11 +304,24 @@ class WebSocketTestClient:
             scope,
         ) = self._find_handler_via_rust()
 
+        self._requested_subprotocols = scope["subprotocols"]
+
+        # Match runbolt: native revocation happens after authentication/guards
+        # but before an optional custom Origin callback.
+        if not is_asgi_mount:
+            revocation_auth = scope.pop("_bolt_revocation_auth", None)
+            if revocation_auth is not None:
+                check = self.api._handler_middleware[handler_id]["websocket_revocation_check"]
+                if await check(revocation_auth):
+                    raise PermissionError("WebSocket connection denied: Token has been revoked")
+
         # The Rust TestClient returns a validator only for the opt-in custom
         # policy. Run it before the app can send websocket.accept.
         custom_validator = scope.pop("_bolt_origin_validator", None)
         if custom_validator is not None:
             headers = {name.lower(): value for name, value in self.headers.items()}
+            if self.subprotocols:
+                headers["sec-websocket-protocol"] = ", ".join(self.subprotocols)
             origin = headers.get("origin")
             context = {"path": self.path, "query_string": self.query_string, "headers": headers}
             try:
@@ -318,19 +331,10 @@ class WebSocketTestClient:
             except Exception as exc:
                 raise PermissionError("Origin not allowed") from exc
 
-        self._requested_subprotocols = scope["subprotocols"]
-
         if is_asgi_mount:
             # A mounted app takes the raw triple. Its first receive gets websocket.connect.
             await self._start_handler(handler, [scope, self._receive, self._send], {})
             return self
-
-        # A revoked token fails the handshake, as the server checks before the upgrade.
-        revocation_auth = scope.pop("_bolt_revocation_auth", None)
-        if revocation_auth is not None:
-            check = self.api._handler_middleware[handler_id]["websocket_revocation_check"]
-            if await check(revocation_auth):
-                raise PermissionError("WebSocket connection denied: Token has been revoked")
 
         # Create WebSocket instance
         ws = WebSocket(scope, self._receive, self._send)

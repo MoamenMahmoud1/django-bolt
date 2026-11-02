@@ -6,10 +6,12 @@ the server.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from .apps import app_module
-from .helpers import attempt_ws_upgrade
+from .helpers import SimpleWebSocketClient, attempt_ws_upgrade
 
 pytestmark = pytest.mark.server_integration
 
@@ -124,6 +126,18 @@ def test_repeated_origins_follow_policy_on_real_server(make_server_project, modu
     assert f" {status_code} " in status
     if status_code == 403:
         assert body == REJECTED_BODY
+
+
+def test_delegated_mount_preserves_repeated_origins_on_real_server(make_server_project):
+    project = make_server_project(api_module=app_module("ws_asgi_mount"))
+    with (
+        project.start() as server,
+        SimpleWebSocketClient(
+            server.host, server.port, "/delegated/ws?report_origins",
+            headers={"Origin": "https://delegated.example", "origin": "https://delegated.example"},
+        ) as websocket,
+    ):
+        assert json.loads(websocket.receive_text()) == ["https://delegated.example"] * 2
 
 
 @pytest.mark.parametrize("path", ["/ws/failing", "/custom/ws"])
