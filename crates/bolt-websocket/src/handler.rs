@@ -700,6 +700,7 @@ async fn check_custom_origin(
     let Some(_pending_slot) = PendingCustomOriginSlot::try_acquire() else {
         return false;
     };
+    let admitted_at = tokio::time::Instant::now();
     let origin = origin.and_then(|v| v.to_str().ok()).map(str::to_owned);
     let future = Python::attach(|py| -> PyResult<_> {
         let context = PyDict::new(py);
@@ -710,22 +711,33 @@ async fn check_custom_origin(
             h.set_item(k, v)?;
         }
         context.set_item("headers", h)?;
-        let coro = validator.call1(py, (origin, context))?;
+        // Translate Rust admission time to Python's monotonic clock.
+        // Only custom policies incur this Python call.
+        let admission_time = py
+            .import("time")?
+            .call_method0("monotonic")?
+            .extract::<f64>()?
+            - admitted_at.elapsed().as_secs_f64();
+        let coro = validator.call1(py, (origin, context, admission_time))?;
         let locals = bolt_loop::worker_task_locals(py)?;
         pyo3_async_runtimes::into_future_with_locals(&locals, coro.bind(py).clone())
     });
     match future {
-        Ok(future) => match tokio::time::timeout(std::time::Duration::from_secs(5), future).await {
-            Ok(Ok(value)) => Python::attach(|py| value.extract::<bool>(py).unwrap_or(false)),
-            Ok(Err(err)) => {
-                eprintln!("[django-bolt] Custom WebSocket Origin validator failed: {err}");
-                false
+        Ok(future) => {
+            match tokio::time::timeout_at(admitted_at + std::time::Duration::from_secs(5), future)
+                .await
+            {
+                Ok(Ok(value)) => Python::attach(|py| value.extract::<bool>(py).unwrap_or(false)),
+                Ok(Err(err)) => {
+                    eprintln!("[django-bolt] Custom WebSocket Origin validator failed: {err}");
+                    false
+                }
+                Err(_) => {
+                    eprintln!("[django-bolt] Custom WebSocket Origin validator timed out");
+                    false
+                }
             }
-            Err(_) => {
-                eprintln!("[django-bolt] Custom WebSocket Origin validator timed out");
-                false
-            }
-        },
+        }
         Err(err) => {
             eprintln!("[django-bolt] Custom WebSocket Origin validator failed: {err}");
             false

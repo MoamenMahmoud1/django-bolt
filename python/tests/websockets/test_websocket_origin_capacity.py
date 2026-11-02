@@ -145,3 +145,72 @@ print('origin worker started', flush=True)
         timeout=8, check=True,
     )
     assert "origin worker started" in result.stdout
+
+
+
+@pytest.mark.asyncio
+async def test_origin_worker_start_failure_does_not_orphan_jobs(monkeypatch):
+    executor = origin_policy._DaemonOriginExecutor()
+    monkeypatch.setattr(origin_policy, "_sync_origin_executor", executor)
+    invoked = []
+
+    def validate(_origin, _context):
+        invoked.append(True)
+        return True
+
+    checked = checked_for(validate)
+    original_start = threading.Thread.start
+
+    def failing_start(thread):
+        if thread.name.startswith("bolt_ws_origin_"):
+            raise RuntimeError("simulated thread start failure")
+        return original_start(thread)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(threading.Thread, "start", failing_start)
+        for _ in range(origin_policy._SYNC_ORIGIN_WORKERS + 1):
+            with pytest.raises(RuntimeError, match="simulated thread start failure"):
+                await checked("https://trusted.example", CTX)
+
+    assert executor._threads == []
+    assert executor._outstanding == 0
+    assert executor._jobs.empty()
+    assert invoked == []
+    assert origin_policy._sync_origin_slots._value == origin_policy._SYNC_ORIGIN_WORKERS
+
+    # The same executor must recover, without executing any orphaned jobs.
+    assert await checked("https://trusted.example", CTX)
+    assert invoked == [True]
+
+
+@pytest.mark.asyncio
+async def test_origin_absolute_deadline_includes_python_scheduling_delay(monkeypatch):
+    monkeypatch.setattr(origin_policy, "_PYTHON_ORIGIN_TIMEOUT_SECONDS", 0.15)
+    entered = []
+    loop = asyncio.get_running_loop()
+
+    async def validate(_origin, _context):
+        entered.append(True)
+        await asyncio.sleep(0.4)
+        return True
+
+    checked = checked_for(validate)
+
+    # Deadline already expired before Python executes the coroutine.
+    with pytest.raises(TimeoutError):
+        await checked("https://trusted.example", CTX, loop.time() - 0.20)
+    assert entered == []
+
+    # Only the remaining budget is available, not another full 0.15 s.
+    with pytest.raises(TimeoutError):
+        await checked("https://trusted.example", CTX, loop.time() - 0.08)
+    assert entered == [True]
+
+    # Both timeout paths must free their Python admission slots.
+    assert await checked_for(
+        lambda _origin, _context: True
+    )("https://trusted.example", CTX)
+    assert (
+        origin_policy._pending_custom_origins._value
+        == origin_policy._MAX_PENDING_CUSTOM_ORIGINS
+    )

@@ -58,14 +58,15 @@ class _DaemonOriginExecutor:
     def submit(self, callback: Callable, *args: Any) -> concurrent.futures.Future:
         future: concurrent.futures.Future = concurrent.futures.Future()
         with self._lock:
-            self._outstanding += 1
-            self._jobs.put((future, callback, args))
-            if len(self._threads) < min(self._outstanding, _SYNC_ORIGIN_WORKERS):
+            if len(self._threads) < min(self._outstanding + 1, _SYNC_ORIGIN_WORKERS):
                 worker = threading.Thread(
                     target=self._run, name=f"bolt_ws_origin_{len(self._threads)}", daemon=True
                 )
-                self._threads.append(worker)
+                # A failed start must leave no queued job or phantom worker.
                 worker.start()
+                self._threads.append(worker)
+            self._outstanding += 1
+            self._jobs.put((future, callback, args))
         return future
 
     def _run(self) -> None:
@@ -203,14 +204,26 @@ def resolve_origin_options(
             raise ValueError("Origin policy='custom' requires a callable origin_validator")
         func = validator
 
-        async def checked(origin: str | None, context: OriginContext) -> bool:
+        async def checked(
+            origin: str | None,
+            context: OriginContext,
+            admitted_at: float | None = None,
+        ) -> bool:
             if not _pending_custom_origins.acquire(blocking=False):
                 raise RuntimeError("Too many pending WebSocket Origin validations")
             try:
                 # Rust timing out its await does not cancel the Python task
                 # created by pyo3-async-runtimes. Cancel it on the Python loop
                 # so a cooperative async validator releases admission promptly.
-                async with asyncio.timeout(_PYTHON_ORIGIN_TIMEOUT_SECONDS):
+                loop = asyncio.get_running_loop()
+                # Rust supplies the admission time in the monotonic clock.
+                # Direct test-client calls start their own deadline.
+                deadline = (
+                    admitted_at if admitted_at is not None else loop.time()
+                ) + _PYTHON_ORIGIN_TIMEOUT_SECONDS
+                if loop.time() >= deadline:
+                    raise TimeoutError("WebSocket Origin validation deadline expired")
+                async with asyncio.timeout_at(deadline):
                     if inspect.iscoroutinefunction(func):
                         result = await func(origin, context)
                     else:
